@@ -171,6 +171,24 @@ def headline_and_body(block):
         return "", ""
     return lines[idx].strip(), "\n".join(lines[idx + 1:]).strip()
 
+URL_RE = re.compile(r"https?://\S+")
+
+def extract_url_from_block(block):
+    """Kalau ada link gambar di dalam slide, ambil sebagai gambar & buang dari teks.
+    Kembalikan (url_atau_None, blok_tanpa_url)."""
+    url = None
+    kept = []
+    for line in block.split("\n"):
+        m = URL_RE.search(line)
+        if m and url is None:
+            url = m.group(0).rstrip(").,")
+            sisa = URL_RE.sub("", line).strip()   # sisa teks di baris itu (kalau ada)
+            if sisa:
+                kept.append(sisa)
+        else:
+            kept.append(line)
+    return url, "\n".join(kept).strip()
+
 def parse_highlights(text):
     out = []
     for part in re.split(r"(==.+?==)", text):
@@ -471,17 +489,22 @@ def process_page(page, workdir):
     slide_blocks = split_slides(content)
     if "single" in fmt.lower():
         slide_blocks = slide_blocks[:1]
-    urls = split_urls(img_field)
-    if not urls:
-        raise ValueError("Kolom 'Gambar URL' kosong. Tempel minimal 1 link gambar (per slide dipisah baris/---).")
+    col_urls = split_urls(img_field)   # link dari kolom 'Gambar URL' (kalau dipakai)
 
     print(f"  -> '{title}' | {fmt} | {len(slide_blocks)} slide | tema={theme}")
 
     slides_data, preview_paths = [], []
     total = len(slide_blocks)
     for i, block in enumerate(slide_blocks, start=1):
-        headline, body = headline_and_body(block)
-        url = urls[i - 1] if i - 1 < len(urls) else urls[-1]   # kalau URL kurang, pakai yang terakhir
+        inline_url, clean_block = extract_url_from_block(block)   # link di dalam Konten (kalau ada)
+        headline, body = headline_and_body(clean_block)
+        # prioritas: link inline di slide -> kalau tidak ada, link dari kolom 'Gambar URL'
+        url = inline_url or (col_urls[i - 1] if i - 1 < len(col_urls) else (col_urls[-1] if col_urls else ""))
+        if not url:
+            raise ValueError(
+                f"Slide {i} tidak punya link gambar. Tempel link gambar di dalam slide itu "
+                f"(baris sendiri), atau isi kolom 'Gambar URL' (1 link per slide)."
+            )
         img_path = os.path.join(workdir, f"slide_{i}.png")
         make_bw_photo(fetch_image_bytes(url), img_path)
         preview_paths.append(img_path)
