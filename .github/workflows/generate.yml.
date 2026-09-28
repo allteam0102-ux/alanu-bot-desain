@@ -1,0 +1,35 @@
+# File ini diletakkan di: .github/workflows/generate.yml
+# ALANU BOT DESAIN — jalan otomatis tiap 20 menit, GRATIS.
+
+name: Alanu Bot Desain
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"    # tiap 20 menit (UTC)
+  workflow_dispatch:           # tombol "Run workflow" buat tes manual
+
+jobs:
+  jalankan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Ambil kode
+        uses: actions/checkout@v4
+
+      - name: Siapkan Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install kebutuhan
+        run: pip install -r requirements.txt
+
+      - name: Jalankan robot
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          STATUS_TYPE: ${{ secrets.STATUS_TYPE }}
+          LOGO_URL: ${{ secrets.LOGO_URL }}
+        run: python main.py
