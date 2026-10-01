@@ -176,12 +176,12 @@ def get_title(props):
 # ======================================================================
 def split_slides(content_text):
     raw = (content_text or "").replace("\r\n", "\n").replace("\r", "\n")
-    blocks = re.split(r"(?m)^\s*(?:[–—]+|-{2,})\s*$", raw)
+    blocks = re.split(r"(?m)^\s*(?:[-–—]{2,}|[–—])\s*$", raw)
     return [b.strip() for b in blocks if b.strip()]
 
 def split_urls(text):
     raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-    raw = re.sub(r"(?m)^\s*(?:[–—]+|-{2,})\s*$", "\n", raw)
+    raw = re.sub(r"(?m)^\s*(?:[-–—]{2,}|[–—])\s*$", "\n", raw)
     return [u.strip() for u in raw.split("\n") if u.strip()]
 
 URL_RE = re.compile(r"https?://\S+")
