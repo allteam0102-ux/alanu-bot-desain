@@ -2,13 +2,10 @@
 """
 ALANU BOT DESAIN  (gaya @ala_nu — foto hitam-putih + panel teks serif)
 ======================================================================
-Alur: Notion (Status "Siap Desain") -> ambil gambar dari kolom 'Gambar URL'
-(tempel link gambar per slide) -> jadikan hitam-putih + grain -> rakit desain
-gaya ala_nu -> kirim ke Telegram. Menghasilkan:
-  1. .pptx -> import ke Canva (teks & gambar bisa diedit)
-  2. .svg  -> tarik ke Figma / Illustrator (teks bisa diedit)
-
-TIDAK pakai Pexels & TIDAK pakai AI. Gambar 100% dari URL yang kamu tempel.
+Notion (Status "Siap Desain") -> gambar dari link tempel (Pinterest) ->
+hitam-putih + grain -> rakit desain -> Telegram.
+Output: .pptx (Canva) + .svg gabungan + .svg per slide.
+Selesai: Status -> Terkirim & ikon halaman -> ✅.
 """
 
 import os
@@ -36,26 +33,27 @@ except Exception:
 
 
 # ======================================================================
-# >>> PENGATURAN BRAND (boleh kamu ubah) <<<
+# >>> PENGATURAN BRAND <<<
 # ======================================================================
 HANDLE        = os.environ.get("HANDLE")        or "@ala_nu"
 ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "E3B23C").lstrip("#")   # kuning/emas
-LOGO_URL      = os.environ.get("LOGO_URL")      or ""                       # logo NU (PNG transparan), opsional
-HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Playfair Display"       # serif elegan
+LOGO_URL      = os.environ.get("LOGO_URL")      or ""
+HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Playfair Display"
 BODY_FONT     = os.environ.get("BODY_FONT")     or "Poppins"
-ARROW_TEXT    = os.environ.get("ARROW_TEXT")    or "→"                 # panah geser
-DEFAULT_THEME = (os.environ.get("DEFAULT_THEME") or "Putih").strip().lower()  # putih / hitam
-PHOTO_FRAC    = float(os.environ.get("PHOTO_FRAC") or 0.46)                 # tinggi foto (bagian atas)
+ARROW_TEXT    = os.environ.get("ARROW_TEXT")    or "→"
+DEFAULT_THEME = (os.environ.get("DEFAULT_THEME") or "Putih").strip().lower()
+PHOTO_FRAC    = float(os.environ.get("PHOTO_FRAC") or 0.46)
 
 CANVAS_W = int(os.environ.get("CANVAS_W") or 1080)
 CANVAS_H = int(os.environ.get("CANVAS_H") or 1350)
 
 OUTPUT_PPTX = (os.environ.get("OUTPUT_PPTX") or "true").lower() == "true"
 OUTPUT_SVG  = (os.environ.get("OUTPUT_SVG")  or "true").lower() == "true"
+OUTPUT_SVG_PER_SLIDE = (os.environ.get("OUTPUT_SVG_PER_SLIDE") or "true").lower() == "true"
 
 
 # ======================================================================
-# 1. PENGATURAN TEKNIS (dari Secrets)
+# 1. TEKNIS (Secrets)
 # ======================================================================
 def env(name, default=None, required=False):
     val = os.environ.get(name, default)
@@ -79,6 +77,7 @@ STATUS_READY = env("STATUS_READY", "Siap Desain")
 STATUS_DONE  = env("STATUS_DONE",  "Terkirim")
 STATUS_ERROR = env("STATUS_ERROR", "Gagal")
 STATUS_TYPE  = env("STATUS_TYPE", "select").strip().lower()
+DONE_EMOJI   = env("DONE_EMOJI", "✅")
 
 def hex_rgb(h):
     h = h.lstrip("#")
@@ -97,7 +96,7 @@ UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 
 
 # ======================================================================
-# 2. HELPER NOTION
+# 2. NOTION
 # ======================================================================
 NOTION_BASE = "https://api.notion.com/v1"
 NOTION_HEADERS = {
@@ -117,7 +116,7 @@ def notion_find_ready():
         raise SystemExit(f"[NOTION ERROR] {resp.status_code}: {resp.text}")
     return resp.json().get("results", [])
 
-def notion_set_status(page_id, status_value, note=None):
+def notion_set_status(page_id, status_value, note=None, icon_emoji=None):
     url = f"{NOTION_BASE}/pages/{page_id}"
     if STATUS_TYPE == "status":
         props = {STATUS_PROPERTY: {"status": {"name": status_value}}}
@@ -126,9 +125,15 @@ def notion_set_status(page_id, status_value, note=None):
     props_with_note = dict(props)
     if note:
         props_with_note["Catatan"] = {"rich_text": [{"text": {"content": note[:1900]}}]}
-    r = requests.patch(url, headers=NOTION_HEADERS, json={"properties": props_with_note}, timeout=60)
-    if r.status_code != 200 and note:
-        requests.patch(url, headers=NOTION_HEADERS, json={"properties": props}, timeout=60)
+    body = {"properties": props_with_note}
+    if icon_emoji:
+        body["icon"] = {"type": "emoji", "emoji": icon_emoji}
+    r = requests.patch(url, headers=NOTION_HEADERS, json=body, timeout=60)
+    if r.status_code != 200:
+        body2 = {"properties": props}
+        if icon_emoji:
+            body2["icon"] = {"type": "emoji", "emoji": icon_emoji}
+        requests.patch(url, headers=NOTION_HEADERS, json=body2, timeout=60)
 
 def _plain_text(rich_list):
     return "".join(part.get("plain_text", "") for part in (rich_list or []))
@@ -149,9 +154,18 @@ def read_property(props, name, kind):
         return (p.get("status") or {}).get("name", "").strip()
     return ""
 
+def get_title(props):
+    t = read_property(props, TITLE_PROPERTY, "title")
+    if t:
+        return t
+    for _n, p in props.items():
+        if isinstance(p, dict) and p.get("type") == "title":
+            return _plain_text(p.get("title", [])).strip()
+    return ""
+
 
 # ======================================================================
-# 3. PARSING ISI KONTEN
+# 3. PARSING
 # ======================================================================
 def split_slides(content_text):
     raw = (content_text or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -159,10 +173,25 @@ def split_slides(content_text):
     return [b.strip() for b in blocks if b.strip()]
 
 def split_urls(text):
-    """URL dipisah baris ATAU '---'. Kembalikan list bersih."""
     raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
     raw = re.sub(r"(?m)^\s*---\s*$", "\n", raw)
     return [u.strip() for u in raw.split("\n") if u.strip()]
+
+URL_RE = re.compile(r"https?://\S+")
+
+def extract_url_from_block(block):
+    url = None
+    kept = []
+    for line in block.split("\n"):
+        m = URL_RE.search(line)
+        if m and url is None:
+            url = m.group(0).rstrip(").,")
+            sisa = URL_RE.sub("", line).strip()
+            if sisa:
+                kept.append(sisa)
+        else:
+            kept.append(line)
+    return url, "\n".join(kept).strip()
 
 def headline_and_body(block):
     lines = block.split("\n")
@@ -170,24 +199,6 @@ def headline_and_body(block):
     if idx is None:
         return "", ""
     return lines[idx].strip(), "\n".join(lines[idx + 1:]).strip()
-
-URL_RE = re.compile(r"https?://\S+")
-
-def extract_url_from_block(block):
-    """Kalau ada link gambar di dalam slide, ambil sebagai gambar & buang dari teks.
-    Kembalikan (url_atau_None, blok_tanpa_url)."""
-    url = None
-    kept = []
-    for line in block.split("\n"):
-        m = URL_RE.search(line)
-        if m and url is None:
-            url = m.group(0).rstrip(").,")
-            sisa = URL_RE.sub("", line).strip()   # sisa teks di baris itu (kalau ada)
-            if sisa:
-                kept.append(sisa)
-        else:
-            kept.append(line)
-    return url, "\n".join(kept).strip()
 
 def parse_highlights(text):
     out = []
@@ -200,7 +211,7 @@ def parse_highlights(text):
 
 
 # ======================================================================
-# 4. GAMBAR (dari URL) -> hitam-putih + grain
+# 4. GAMBAR -> hitam-putih + grain
 # ======================================================================
 def fetch_image_bytes(url):
     r = requests.get(url, headers=UA, timeout=60)
@@ -209,13 +220,11 @@ def fetch_image_bytes(url):
     if "image" not in ct:
         raise ValueError(
             f"URL bukan gambar langsung (Content-Type: {ct or 'tidak diketahui'}). "
-            f"Di Pinterest: klik kanan gambarnya -> 'Copy image address' (link diakhiri .jpg/.png), "
-            f"bukan menyalin link halaman pin."
+            f"Di Pinterest: klik kanan gambar -> 'Copy image address' (link diakhiri .jpg/.png)."
         )
     return r.content
 
 def make_bw_photo(img_bytes, out_path):
-    """Potong ke area foto (atas), jadikan grayscale + grain halus."""
     im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     PH = int(CANVAS_H * PHOTO_FRAC)
     target = CANVAS_W / PH
@@ -225,17 +234,13 @@ def make_bw_photo(img_bytes, out_path):
     else:
         nh = int(w / target); y = (h - nh) // 2; im = im.crop((0, y, w, y + nh))
     im = im.resize((CANVAS_W, PH), Image.LANCZOS)
-
-    gray = ImageOps.grayscale(im)                       # hitam-putih
-    gray = ImageOps.autocontrast(gray, cutoff=1)        # kontras rapi
+    gray = ImageOps.autocontrast(ImageOps.grayscale(im), cutoff=1)
     try:
-        grain = Image.effect_noise((CANVAS_W, PH), 22)  # tekstur film
+        grain = Image.effect_noise((CANVAS_W, PH), 22)
         gray = Image.blend(gray, grain, 0.08)
     except Exception:
         pass
     photo = gray.convert("RGB")
-
-    # sedikit gelap di atas biar logo & handle terbaca
     overlay = Image.new("RGBA", (CANVAS_W, PH), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     top_h = int(PH * 0.28)
@@ -247,14 +252,12 @@ def make_bw_photo(img_bytes, out_path):
 
 
 # ======================================================================
-# 5. WARNA TEMA
+# 5. TEMA
 # ======================================================================
 def theme_colors(theme):
-    """Kembalikan (panel_bg_hex, headline_hex, body_hex) sesuai tema."""
     if str(theme).strip().lower().startswith("hitam"):
         return "0E0E0E", "FFFFFF", "CFCFCF"
-    return "FFFFFF", "141414", "4A4A4A"   # Putih (default)
-
+    return "FFFFFF", "141414", "4A4A4A"
 
 def download_logo_path():
     if not LOGO_URL:
@@ -272,7 +275,7 @@ def download_logo_path():
 
 
 # ======================================================================
-# 6. RAKIT .PPTX (untuk Canva)
+# 6. PPTX
 # ======================================================================
 def _add_text(slide, left, top, width, height, text, size_pt, bold, font, color_hex,
               align=PP_ALIGN.LEFT, highlight=False, italic=False):
@@ -289,57 +292,41 @@ def _add_text(slide, left, top, width, height, text, size_pt, bold, font, color_
             run = p.add_run()
             run.text = seg
             f = run.font
-            f.size = Pt(size_pt)
-            f.bold = bold
-            f.italic = italic
-            f.name = font
+            f.size = Pt(size_pt); f.bold = bold; f.italic = italic; f.name = font
             f.color.rgb = ACCENT if is_hl else hex_rgb(color_hex)
     return box
 
 def build_pptx(slides_data, out_path, logo_path):
     prs = Presentation()
-    prs.slide_width = Emu(EMU_W)
-    prs.slide_height = Emu(EMU_H)
+    prs.slide_width = Emu(EMU_W); prs.slide_height = Emu(EMU_H)
     blank = prs.slide_layouts[6]
-
     for s in slides_data:
         panel_bg, head_c, body_c = theme_colors(s["theme"])
         slide = prs.slides.add_slide(blank)
-
-        # panel bawah (latar penuh dulu, lalu foto di atas)
         panel = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, prs.slide_width, prs.slide_height)
         panel.fill.solid(); panel.fill.fore_color.rgb = hex_rgb(panel_bg)
         panel.line.fill.background(); panel.shadow.inherit = False
-
-        # foto (bagian atas)
         slide.shapes.add_picture(s["image_path"], 0, 0, width=prs.slide_width, height=fy(PHOTO_FRAC))
-
-        # logo + handle di atas foto
         if logo_path:
             try:
-                slide.shapes.add_picture(logo_path, fx(0.06), fy(0.05), height=fy(0.05))
+                slide.shapes.add_picture(logo_path, fx(0.06), fy(0.045), height=fy(0.045))
             except Exception:
                 pass
-        _add_text(slide, 0.50, 0.05, 0.44, 0.06, HANDLE, 13, True, BODY_FONT, "FFFFFF", align=PP_ALIGN.RIGHT)
-
-        # headline (serif) + body
+        _add_text(slide, 0.52, 0.045, 0.42, 0.08, HANDLE, 14, True, BODY_FONT, "FFFFFF", align=PP_ALIGN.RIGHT)
         top = PHOTO_FRAC + 0.05
         if s["headline"]:
             _add_text(slide, 0.07, top, 0.86, 0.20, s["headline"], 33, True, HEADLINE_FONT, head_c, highlight=True)
         if s["body"]:
             _add_text(slide, 0.07, top + 0.20, 0.86, 0.22, s["body"], 18, False, BODY_FONT, body_c, highlight=True)
-
-        # footer handle + panah
         _add_text(slide, 0.06, 0.935, 0.5, 0.05, HANDLE, 12, False, BODY_FONT, body_c)
         if s["total"] > 1:
             _add_text(slide, 0.80, 0.925, 0.14, 0.06, ARROW_TEXT, 24, True, BODY_FONT, head_c, align=PP_ALIGN.RIGHT)
-
     prs.save(out_path)
     return out_path
 
 
 # ======================================================================
-# 7. RAKIT .SVG (untuk Figma) — SATU file, semua slide berjejer
+# 7. SVG
 # ======================================================================
 def _img_data_uri(path):
     im = Image.open(path).convert("RGB")
@@ -370,22 +357,41 @@ def _wrap(text, max_chars):
 def _svg_text(text, x, y, width, size, bold, font, color_hex, anchor="start", highlight=False, gap=1.3):
     weight = "700" if bold else "400"
     max_chars = max(6, int(width / (size * 0.55)))
+    def words_of(line):
+        res = []
+        for seg, is_hl in (parse_highlights(line) if highlight else [(line, False)]):
+            for w in seg.split(" "):
+                if w != "":
+                    res.append((w, is_hl))
+        return res
     out = []
-    for i, line in enumerate(_wrap(text, max_chars)):
-        base = y + size + int(i * size * gap)
-        spans = ""
-        segs = parse_highlights(line) if highlight else [(line, False)]
-        for seg, is_hl in segs:
-            fill = ACCENT_COLOR if is_hl else color_hex
-            spans += f'<tspan fill="#{fill}">{_svg_escape(seg)}</tspan>'
-        out.append(
-            f'<text x="{x}" y="{base}" text-anchor="{anchor}" '
-            f'font-family="{_svg_escape(font)}, Georgia, serif" '
-            f'font-size="{size}" font-weight="{weight}">{spans}</text>'
-        )
+    yy = y
+    for src in text.split("\n"):
+        ws = words_of(src)
+        if not ws:
+            yy += int(size * gap); continue
+        vlines, cur, cur_len = [], [], 0
+        for w, is_hl in ws:
+            add = len(w) + (1 if cur else 0)
+            if cur and cur_len + add > max_chars:
+                vlines.append(cur); cur, cur_len = [], 0; add = len(w)
+            cur.append((w, is_hl)); cur_len += add
+        if cur:
+            vlines.append(cur)
+        for vl in vlines:
+            base = yy + size
+            spans = ""
+            for k, (w, is_hl) in enumerate(vl):
+                prefix = " " if k > 0 else ""
+                fill = ACCENT_COLOR if is_hl else color_hex
+                spans += f'<tspan fill="#{fill}">{_svg_escape(prefix + w)}</tspan>'
+            out.append(f'<text x="{x}" y="{int(base)}" text-anchor="{anchor}" xml:space="preserve" '
+                       f'font-family="{_svg_escape(font)}, Georgia, serif" '
+                       f'font-size="{size}" font-weight="{weight}">{spans}</text>')
+            yy += int(size * gap)
     return "\n".join(out)
 
-def build_svg_single(slides_data, out_path, logo_path):
+def build_svg(slides_data, out_path, logo_path):
     total = len(slides_data)
     W = CANVAS_W * total
     H = CANVAS_H
@@ -398,25 +404,18 @@ def build_svg_single(slides_data, out_path, logo_path):
             logo_uri = "data:image/png;base64," + base64.b64encode(b.getvalue()).decode()
         except Exception:
             pass
-
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">']
     for idx, s in enumerate(slides_data):
         xo = idx * CANVAS_W
         panel_bg, head_c, body_c = theme_colors(s["theme"])
-        # panel penuh
         parts.append(f'<rect x="{xo}" y="0" width="{CANVAS_W}" height="{H}" fill="#{panel_bg}"/>')
-        # foto atas
-        parts.append(
-            f'<image x="{xo}" y="0" width="{CANVAS_W}" height="{PH}" '
-            f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(s["image_path"])}"/>'
-        )
-        # logo + handle
+        parts.append(f'<image x="{xo}" y="0" width="{CANVAS_W}" height="{PH}" '
+                     f'preserveAspectRatio="xMidYMid slice" href="{_img_data_uri(s["image_path"])}"/>')
         if logo_uri:
             parts.append(f'<image x="{xo + int(0.06*CANVAS_W)}" y="{int(0.05*CANVAS_H)}" '
                          f'height="{int(0.05*CANVAS_H)}" href="{logo_uri}"/>')
         parts.append(_svg_text(HANDLE, xo + int(0.94*CANVAS_W), int(0.05*CANVAS_H),
                                int(0.4*CANVAS_W), 24, True, BODY_FONT, "FFFFFF", anchor="end"))
-        # headline serif + body
         ty = int((PHOTO_FRAC + 0.05) * CANVAS_H)
         if s["headline"]:
             parts.append(_svg_text(s["headline"], xo + int(0.07*CANVAS_W), ty,
@@ -424,7 +423,6 @@ def build_svg_single(slides_data, out_path, logo_path):
         if s["body"]:
             parts.append(_svg_text(s["body"], xo + int(0.07*CANVAS_W), ty + int(0.20*CANVAS_H),
                                    int(0.86*CANVAS_W), 30, False, BODY_FONT, body_c, highlight=True))
-        # footer handle + panah
         parts.append(_svg_text(HANDLE, xo + int(0.06*CANVAS_W), int(0.93*CANVAS_H),
                                int(0.4*CANVAS_W), 22, False, BODY_FONT, body_c))
         if total > 1:
@@ -462,13 +460,11 @@ def tg_message(text):
 
 def tg_photo(path, caption=""):
     with open(path, "rb") as f:
-        return _tg_call("sendPhoto", {"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
-                        {"photo": f}, label="photo")
+        return _tg_call("sendPhoto", {"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]}, {"photo": f}, label="photo")
 
 def tg_document(path, caption=""):
     with open(path, "rb") as f:
-        return _tg_call("sendDocument", {"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
-                        {"document": f}, label="doc")
+        return _tg_call("sendDocument", {"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]}, {"document": f}, label="doc")
 
 
 # ======================================================================
@@ -476,12 +472,11 @@ def tg_document(path, caption=""):
 # ======================================================================
 def process_page(page, workdir):
     props = page["properties"]
-    title = read_property(props, TITLE_PROPERTY, "title") or "Tanpa Judul"
+    title = get_title(props) or "Tanpa Judul"
     fmt = read_property(props, FORMAT_PROPERTY, "select") or "Single Post"
     content = read_property(props, CONTENT_PROPERTY, "rich_text")
-    # kolom Gambar URL bisa bertipe URL atau Text -> coba dua-duanya
     img_field = read_property(props, IMGURL_PROPERTY, "url") or read_property(props, IMGURL_PROPERTY, "rich_text")
-    theme = read_property(props, THEME_PROPERTY, "select") or DEFAULT_THEME
+    theme = read_property(props, THEME_PROPERTY, "select") or read_property(props, THEME_PROPERTY, "status") or DEFAULT_THEME
 
     if not content.strip():
         raise ValueError("Kolom 'Konten' kosong.")
@@ -489,22 +484,19 @@ def process_page(page, workdir):
     slide_blocks = split_slides(content)
     if "single" in fmt.lower():
         slide_blocks = slide_blocks[:1]
-    col_urls = split_urls(img_field)   # link dari kolom 'Gambar URL' (kalau dipakai)
+    col_urls = split_urls(img_field)
 
     print(f"  -> '{title}' | {fmt} | {len(slide_blocks)} slide | tema={theme}")
 
     slides_data, preview_paths = [], []
     total = len(slide_blocks)
     for i, block in enumerate(slide_blocks, start=1):
-        inline_url, clean_block = extract_url_from_block(block)   # link di dalam Konten (kalau ada)
+        inline_url, clean_block = extract_url_from_block(block)
         headline, body = headline_and_body(clean_block)
-        # prioritas: link inline di slide -> kalau tidak ada, link dari kolom 'Gambar URL'
         url = inline_url or (col_urls[i - 1] if i - 1 < len(col_urls) else (col_urls[-1] if col_urls else ""))
         if not url:
-            raise ValueError(
-                f"Slide {i} tidak punya link gambar. Tempel link gambar di dalam slide itu "
-                f"(baris sendiri), atau isi kolom 'Gambar URL' (1 link per slide)."
-            )
+            raise ValueError(f"Slide {i} tidak punya link gambar. Tempel link gambar di slide itu, "
+                             f"atau isi kolom 'Gambar URL'.")
         img_path = os.path.join(workdir, f"slide_{i}.png")
         make_bw_photo(fetch_image_bytes(url), img_path)
         preview_paths.append(img_path)
@@ -514,7 +506,6 @@ def process_page(page, workdir):
     safe_name = re.sub(r"[^\w\- ]", "", title).strip().replace(" ", "_")[:40] or "desain"
     logo_path = download_logo_path()
 
-    # ringkasan caption
     lines = [f"🕌 {title}  ({fmt}, {total} slide, tema {theme})", ""]
     for i, s in enumerate(slides_data, start=1):
         h = s["headline"] or "(tanpa judul)"
@@ -527,17 +518,26 @@ def process_page(page, workdir):
     for i, p in enumerate(preview_paths, start=1):
         tg_photo(p, caption=f"Preview slide {i}/{total}")
 
+    tg_message(f"📎 ====================\nFILE DESAIN: {title}\n====================")
+
     if OUTPUT_PPTX:
         pptx_path = os.path.join(workdir, f"{safe_name}.pptx")
         build_pptx(slides_data, pptx_path, logo_path)
-        if not tg_document(pptx_path, caption=f"{title} — .pptx: import ke Canva ✨"):
+        if not tg_document(pptx_path, caption=f"{title} — .pptx (semua slide): import ke Canva ✨"):
             tg_message("⚠️ File .pptx gagal dikirim (cek log).")
 
     if OUTPUT_SVG:
         svg_path = os.path.join(workdir, f"{safe_name}.svg")
-        build_svg_single(slides_data, svg_path, logo_path)
-        if not tg_document(svg_path, caption=f"{title} — .svg: tarik ke Figma (teks bisa diedit) ✨"):
+        build_svg(slides_data, svg_path, logo_path)
+        if not tg_document(svg_path, caption=f"{title} — .svg (semua slide): tarik ke Figma ✨"):
             tg_message("⚠️ File .svg gagal dikirim (cek log).")
+
+    if OUTPUT_SVG_PER_SLIDE and total > 1:
+        for s in slides_data:
+            sp = os.path.join(workdir, f"{safe_name}_slide{s['index']}.svg")
+            build_svg([s], sp, logo_path)
+            if not tg_document(sp, caption=f"{title} — slide {s['index']}/{total} (.svg per slide)"):
+                tg_message(f"⚠️ SVG slide {s['index']} gagal dikirim (cek log).")
 
     return total
 
@@ -546,7 +546,7 @@ def process_page(page, workdir):
 # 10. MAIN
 # ======================================================================
 def main():
-    print(f"== ALANU BOT DESAIN ({CANVAS_W}x{CANVAS_H}) | pptx={OUTPUT_PPTX} svg={OUTPUT_SVG} ==")
+    print(f"== ALANU BOT DESAIN ({CANVAS_W}x{CANVAS_H}) ==")
     if tg_message("✅ Alanu bot desain — mulai jalan."):
         print("  Telegram OK.")
     else:
@@ -556,24 +556,22 @@ def main():
     if not pages:
         print("Tidak ada yang perlu diproses. Selesai.")
         return
-
     for page in pages:
         page_id = page["id"]
         workdir = tempfile.mkdtemp()
         try:
             process_page(page, workdir)
-            notion_set_status(page_id, STATUS_DONE)
-            print("  v Sukses & status diubah jadi:", STATUS_DONE)
+            notion_set_status(page_id, STATUS_DONE, icon_emoji=DONE_EMOJI)
+            print("  v Sukses & status ->", STATUS_DONE, "| ikon ->", DONE_EMOJI)
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             print("  x GAGAL:", err)
             traceback.print_exc()
             try:
-                tg_message(f"⚠️ Gagal memproses '{read_property(page['properties'], TITLE_PROPERTY, 'title')}'.\n{err}")
+                tg_message(f"⚠️ Gagal memproses '{get_title(page['properties'])}'.\n{err}")
             except Exception:
                 pass
             notion_set_status(page_id, STATUS_ERROR, note=err)
-
     print("== Selesai ==")
 
 
