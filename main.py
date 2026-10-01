@@ -14,6 +14,7 @@ import io
 import html
 import time
 import base64
+import random
 import tempfile
 import traceback
 
@@ -65,12 +66,16 @@ NOTION_TOKEN        = env("NOTION_TOKEN", required=True)
 NOTION_DATABASE_ID  = env("NOTION_DATABASE_ID", required=True)
 TELEGRAM_BOT_TOKEN  = env("TELEGRAM_BOT_TOKEN", required=True)
 TELEGRAM_CHAT_ID    = env("TELEGRAM_CHAT_ID", required=True)
+PEXELS_API_KEY      = os.environ.get("PEXELS_API_KEY", "")        # buat auto (kalau tak tempel link)
+UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")   # buat auto (utama kalau diisi)
+STYLE_HINT          = os.environ.get("STYLE_HINT") or "cinematic moody aesthetic silhouette dramatic light"
 
 TITLE_PROPERTY   = env("TITLE_PROPERTY", "Judul")
 STATUS_PROPERTY  = env("STATUS_PROPERTY", "Status")
 FORMAT_PROPERTY  = env("FORMAT_PROPERTY", "Format")
 CONTENT_PROPERTY = env("CONTENT_PROPERTY", "Konten")
 IMGURL_PROPERTY  = env("IMGURL_PROPERTY", "Gambar URL")
+KEYWORD_PROPERTY = env("KEYWORD_PROPERTY", "Kata Kunci Gambar")
 THEME_PROPERTY   = env("THEME_PROPERTY", "Tema")
 
 STATUS_READY = env("STATUS_READY", "Siap Desain")
@@ -78,6 +83,8 @@ STATUS_DONE  = env("STATUS_DONE",  "Terkirim")
 STATUS_ERROR = env("STATUS_ERROR", "Gagal")
 STATUS_TYPE  = env("STATUS_TYPE", "select").strip().lower()
 DONE_EMOJI   = env("DONE_EMOJI", "✅")
+
+PEXELS_ORIENTATION = "portrait"
 
 def hex_rgb(h):
     h = h.lstrip("#")
@@ -223,6 +230,71 @@ def fetch_image_bytes(url):
             f"Di Pinterest: klik kanan gambar -> 'Copy image address' (link diakhiri .jpg/.png)."
         )
     return r.content
+
+def keyword_for(index, keyword_blocks, headline, body):
+    if index < len(keyword_blocks) and keyword_blocks[index].strip():
+        q = keyword_blocks[index].strip()
+    elif headline:
+        q = headline
+    elif body:
+        q = body
+    else:
+        q = "cinematic silhouette"
+    q = re.sub(r"==", "", q)
+    words = re.sub(r"[^\w\s]", " ", q).split()
+    return " ".join(words[:4]) if words else "cinematic silhouette"
+
+def pexels_pick(query, used_ids):
+    def _search(q):
+        r = requests.get("https://api.pexels.com/v1/search",
+                         headers={"Authorization": PEXELS_API_KEY},
+                         params={"query": q, "per_page": 15, "orientation": PEXELS_ORIENTATION}, timeout=60)
+        r.raise_for_status()
+        return r.json().get("photos", [])
+    photos = _search(f"{query} {STYLE_HINT}".strip()) or _search(query)
+    if not photos:
+        return None
+    fresh = [p for p in photos if p.get("id") not in used_ids]
+    pool = fresh if fresh else photos
+    photo = random.choice(pool[:8])
+    if photo.get("id"):
+        used_ids.add(photo["id"])
+    u = photo["src"].get("large2x") or photo["src"].get("large") or photo["src"]["original"]
+    return requests.get(u, timeout=60).content
+
+def unsplash_pick(query, used_ids):
+    r = requests.get("https://api.unsplash.com/search/photos",
+                     headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
+                     params={"query": f"{query} {STYLE_HINT}".strip(), "per_page": 15,
+                             "orientation": PEXELS_ORIENTATION}, timeout=60)
+    r.raise_for_status()
+    results = r.json().get("results", [])
+    if not results:
+        return None
+    fresh = [p for p in results if p.get("id") not in used_ids]
+    pool = fresh if fresh else results
+    photo = random.choice(pool[:8])
+    if photo.get("id"):
+        used_ids.add(photo["id"])
+    urls = photo.get("urls", {})
+    return requests.get(urls.get("regular") or urls.get("full") or urls.get("raw"), timeout=60).content
+
+def auto_image_bytes(query, used_ids):
+    """Ambil otomatis (tanpa link): Unsplash dulu, Pexels cadangan."""
+    sources = []
+    if UNSPLASH_ACCESS_KEY:
+        sources.append("unsplash")
+    if PEXELS_API_KEY:
+        sources.append("pexels")
+    for q in [query, "cinematic moody silhouette", "dramatic light nature"]:
+        for src in sources:
+            try:
+                data = (unsplash_pick if src == "unsplash" else pexels_pick)(q, used_ids)
+                if data:
+                    return data
+            except Exception as e:
+                print(f"    ! {src} gagal ('{q}'): {e}")
+    return None
 
 def make_bw_photo(img_bytes, out_path):
     im = Image.open(io.BytesIO(img_bytes)).convert("RGB")
@@ -485,20 +557,30 @@ def process_page(page, workdir):
     if "single" in fmt.lower():
         slide_blocks = slide_blocks[:1]
     col_urls = split_urls(img_field)
+    keyword_blocks = split_slides(read_property(props, KEYWORD_PROPERTY, "rich_text"))
 
     print(f"  -> '{title}' | {fmt} | {len(slide_blocks)} slide | tema={theme}")
 
     slides_data, preview_paths = [], []
+    used_ids = set()
     total = len(slide_blocks)
     for i, block in enumerate(slide_blocks, start=1):
         inline_url, clean_block = extract_url_from_block(block)
         headline, body = headline_and_body(clean_block)
-        url = inline_url or (col_urls[i - 1] if i - 1 < len(col_urls) else (col_urls[-1] if col_urls else ""))
-        if not url:
-            raise ValueError(f"Slide {i} tidak punya link gambar. Tempel link gambar di slide itu, "
-                             f"atau isi kolom 'Gambar URL'.")
+        url = inline_url or (col_urls[i - 1] if i - 1 < len(col_urls) else "")
         img_path = os.path.join(workdir, f"slide_{i}.png")
-        make_bw_photo(fetch_image_bytes(url), img_path)
+        if url:                                   # ada link (Pinterest) -> pakai
+            make_bw_photo(fetch_image_bytes(url), img_path)
+        else:                                     # tak ada link -> auto Unsplash/Pexels
+            q = keyword_for(i - 1, keyword_blocks, headline, body)
+            data = auto_image_bytes(q, used_ids)
+            if not data:
+                raise ValueError(
+                    f"Slide {i}: tak ada link gambar DAN auto gagal. "
+                    f"Tempel link di slide, isi 'Kata Kunci Gambar' (Inggris), "
+                    f"atau isi secret UNSPLASH_ACCESS_KEY / PEXELS_API_KEY."
+                )
+            make_bw_photo(data, img_path)
         preview_paths.append(img_path)
         slides_data.append({"headline": headline, "body": body, "image_path": img_path,
                             "index": i, "total": total, "theme": theme})
