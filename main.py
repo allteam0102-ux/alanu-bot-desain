@@ -244,6 +244,10 @@ def keyword_for(index, keyword_blocks, headline, body):
     words = re.sub(r"[^\w\s]", " ", q).split()
     return " ".join(words[:4]) if words else "cinematic silhouette"
 
+def _short_q(query):
+    words = (query or "").split()[:3]
+    return " ".join(words) if words else "aesthetic portrait"
+
 def pexels_pick(query, used_ids):
     def _search(q):
         r = requests.get("https://api.pexels.com/v1/search",
@@ -251,7 +255,8 @@ def pexels_pick(query, used_ids):
                          params={"query": q, "per_page": 15, "orientation": PEXELS_ORIENTATION}, timeout=60)
         r.raise_for_status()
         return r.json().get("photos", [])
-    photos = _search(f"{query} {STYLE_HINT}".strip()) or _search(query)
+    q = _short_q(query)
+    photos = _search(q) or _search(q + " aesthetic") or _search("aesthetic portrait")
     if not photos:
         return None
     fresh = [p for p in photos if p.get("id") not in used_ids]
@@ -265,7 +270,7 @@ def pexels_pick(query, used_ids):
 def unsplash_pick(query, used_ids):
     r = requests.get("https://api.unsplash.com/search/photos",
                      headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
-                     params={"query": f"{query} {STYLE_HINT}".strip(), "per_page": 15,
+                     params={"query": _short_q(query), "per_page": 15,
                              "orientation": PEXELS_ORIENTATION}, timeout=60)
     r.raise_for_status()
     results = r.json().get("results", [])
@@ -286,14 +291,14 @@ def auto_image_bytes(query, used_ids):
         sources.append("unsplash")
     if PEXELS_API_KEY:
         sources.append("pexels")
-    for q in [query, "cinematic moody silhouette", "dramatic light nature"]:
+    for q in [query, "praying silhouette", "dramatic light nature"]:
         for src in sources:
             try:
                 data = (unsplash_pick if src == "unsplash" else pexels_pick)(q, used_ids)
                 if data:
                     return data
             except Exception as e:
-                print(f"    ! {src} gagal ('{q}'): {e}")
+                print(f"    ! {src} gagal ('{_short_q(q)}'): {e}")
     return None
 
 def make_bw_photo(img_bytes, out_path):
