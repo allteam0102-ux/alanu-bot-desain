@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "*/20 * * * *"
   workflow_dispatch:
+
+# izin menulis balik file memori (memory.json) ke repo
+permissions:
+  contents: write
+
 jobs:
   jalankan:
     runs-on: ubuntu-latest
@@ -27,4 +32,31 @@ jobs:
           LOGO_URL: ${{ secrets.LOGO_URL }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
+          AI_PRIMARY: ${{ secrets.AI_PRIMARY }}
+          VISION_CHECK_ENABLED: ${{ secrets.VISION_CHECK_ENABLED }}
         run: python main.py
+
+      - name: Simpan memori belajar (memory.json)
+        if: always()
+        run: |
+          if [ ! -f memory.json ]; then
+            echo "memory.json belum dibuat (belum ada feedback)."; exit 0
+          fi
+          git config user.name "alanu-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add memory.json
+          git commit -m "update memori belajar [skip ci]" || { echo "tidak ada perubahan memori"; exit 0; }
+          # anti-bentrok: kalau run lain udah ngubah memory.json, menang punya run ini (-X ours),
+          # tetap di branch (bukan rebase yg bisa detached HEAD), + coba ulang beberapa kali
+          for i in 1 2 3 4 5; do
+            git fetch origin "${GITHUB_REF_NAME:-main}" || true
+            git merge -X ours --no-edit "origin/${GITHUB_REF_NAME:-main}" || true
+            if git push origin "HEAD:${GITHUB_REF_NAME:-main}"; then
+              echo "memori tersimpan."; exit 0
+            fi
+            echo "push bentrok, coba lagi ($i)..."; sleep 3
+          done
+          echo "memori gagal disimpan setelah beberapa percobaan."
