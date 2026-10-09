@@ -41,8 +41,8 @@ except Exception:
 HANDLE        = os.environ.get("HANDLE")        or "@ala_nu"
 ACCENT_COLOR  = (os.environ.get("ACCENT_COLOR") or "E3B23C").lstrip("#")   # kuning/emas
 LOGO_URL      = os.environ.get("LOGO_URL")      or ""
-HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Playfair Display"
-BODY_FONT     = os.environ.get("BODY_FONT")     or "Poppins"
+HEADLINE_FONT = os.environ.get("HEADLINE_FONT") or "Vremena Grotesk"
+BODY_FONT     = os.environ.get("BODY_FONT")     or "Vremena Grotesk"
 ARROW_TEXT    = os.environ.get("ARROW_TEXT")    or "→"
 DEFAULT_THEME = (os.environ.get("DEFAULT_THEME") or "Putih").strip().lower()
 PHOTO_FRAC    = float(os.environ.get("PHOTO_FRAC") or 0.46)
@@ -95,8 +95,11 @@ NOTION_DATABASE_ID  = env("NOTION_DATABASE_ID", required=True)
 TELEGRAM_BOT_TOKEN  = env("TELEGRAM_BOT_TOKEN", required=True)
 TELEGRAM_CHAT_ID    = env("TELEGRAM_CHAT_ID", required=True)
 PEXELS_API_KEY      = os.environ.get("PEXELS_API_KEY", "")        # buat auto (kalau tak tempel link)
-UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")   # buat auto (utama kalau diisi)
+UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")   # buat auto
+PIXABAY_API_KEY     = os.environ.get("PIXABAY_API_KEY", "")       # buat auto (sumber tambahan)
 STYLE_HINT          = os.environ.get("STYLE_HINT") or "cinematic moody aesthetic silhouette dramatic light"
+# bias Islami: kata yg ditambahkan biar hasil foto tetap bernuansa muslim/islami
+ISLAMIC_HINT        = os.environ.get("ISLAMIC_HINT") or "muslim islamic"
 
 TITLE_PROPERTY   = env("TITLE_PROPERTY", "Judul")
 STATUS_PROPERTY  = env("STATUS_PROPERTY", "Status")
@@ -286,6 +289,16 @@ def _short_q(query):
     words = (query or "").split()[:3]
     return " ".join(words) if words else "aesthetic portrait"
 
+def _islamic_q(query):
+    """Query pendek + dipastikan ada nuansa Islami (muslim/hijab/mosque/dll),
+    tapi tetap bawa konteks dari isi konten."""
+    base = _short_q(query)
+    low = base.lower()
+    keys = ("muslim", "islam", "hijab", "mosque", "masjid", "quran", "pray", "ramadan", "ummah", "sholat")
+    if not any(k in low for k in keys):
+        base = (base + " " + ISLAMIC_HINT).strip()
+    return base
+
 def pexels_pick(query, used_ids):
     def _search(q):
         r = requests.get("https://api.pexels.com/v1/search",
@@ -293,8 +306,8 @@ def pexels_pick(query, used_ids):
                          params={"query": q, "per_page": 15, "orientation": PEXELS_ORIENTATION}, timeout=60)
         r.raise_for_status()
         return r.json().get("photos", [])
-    q = _short_q(query)
-    photos = _search(q) or _search(q + " aesthetic") or _search("aesthetic portrait")
+    q = _islamic_q(query)
+    photos = _search(q) or _search(q + " aesthetic") or _search("muslim praying silhouette")
     if not photos:
         return None
     fresh = [p for p in photos if p.get("id") not in used_ids]
@@ -305,10 +318,27 @@ def pexels_pick(query, used_ids):
     u = photo["src"].get("large2x") or photo["src"].get("large") or photo["src"]["original"]
     return requests.get(u, timeout=60).content
 
+def pixabay_pick(query, used_ids):
+    r = requests.get("https://pixabay.com/api/",
+                     params={"key": PIXABAY_API_KEY, "q": _islamic_q(query),
+                             "image_type": "photo", "orientation": "vertical",
+                             "safesearch": "true", "per_page": 20}, timeout=60)
+    r.raise_for_status()
+    hits = r.json().get("hits", [])
+    if not hits:
+        return None
+    fresh = [p for p in hits if p.get("id") not in used_ids]
+    pool = fresh if fresh else hits
+    photo = random.choice(pool[:10])
+    if photo.get("id"):
+        used_ids.add(photo["id"])
+    u = photo.get("largeImageURL") or photo.get("webformatURL")
+    return requests.get(u, headers=UA, timeout=60).content
+
 def unsplash_pick(query, used_ids):
     r = requests.get("https://api.unsplash.com/search/photos",
                      headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
-                     params={"query": _short_q(query), "per_page": 15,
+                     params={"query": _islamic_q(query), "per_page": 15,
                              "orientation": PEXELS_ORIENTATION}, timeout=60)
     r.raise_for_status()
     results = r.json().get("results", [])
@@ -323,20 +353,21 @@ def unsplash_pick(query, used_ids):
     return requests.get(urls.get("regular") or urls.get("full") or urls.get("raw"), timeout=60).content
 
 def auto_image_bytes(query, used_ids):
-    """Ambil otomatis (tanpa link): Unsplash dulu, Pexels cadangan."""
+    """Ambil otomatis (tanpa link): Pixabay + Pexels + Unsplash. Semua dibias Islami + sesuai konteks."""
+    picker = {"unsplash": unsplash_pick, "pexels": pexels_pick, "pixabay": pixabay_pick}
     sources = []
-    if UNSPLASH_ACCESS_KEY:
-        sources.append("unsplash")
-    if PEXELS_API_KEY:
-        sources.append("pexels")
-    for q in [query, "praying silhouette", "dramatic light nature"]:
+    if PIXABAY_API_KEY:     sources.append("pixabay")
+    if UNSPLASH_ACCESS_KEY: sources.append("unsplash")
+    if PEXELS_API_KEY:      sources.append("pexels")
+    # query utama (konteks konten) -> kalau mentok, fallback islami umum
+    for q in [query, "muslim praying silhouette", "woman hijab contemplative", "mosque dramatic light"]:
         for src in sources:
             try:
-                data = (unsplash_pick if src == "unsplash" else pexels_pick)(q, used_ids)
+                data = picker[src](q, used_ids)
                 if data:
                     return data
             except Exception as e:
-                print(f"    ! {src} gagal ('{_short_q(q)}'): {e}")
+                print(f"    ! {src} gagal ('{_islamic_q(q)}'): {e}")
     return None
 
 def make_bw_photo(img_bytes, out_path):
@@ -805,8 +836,11 @@ def ai_image_keywords(slide_texts):
     prompt = (
         "Kamu art director untuk brand spiritual Nahdiyyin (Ala NU) — gaya sinematik, moody, "
         "dramatic light, foto hitam-putih, nuansa tenang & khusyuk.\n"
-        "Untuk TIAP slide di bawah, buat 1 kata kunci pencarian FOTO STOK dalam BAHASA INGGRIS (3-5 kata), "
-        "fokus ke suasana/visual (bukan terjemahan harfiah teks), hindari tulisan/logo, utamakan natural light & tone lembut.\n"
+        "Untuk TIAP slide di bawah, buat 1 kata kunci pencarian FOTO STOK dalam BAHASA INGGRIS (3-5 kata).\n"
+        "WAJIB: setiap kata kunci bernuansa ISLAMI/MUSLIM (mis. 'muslim', 'hijab', 'mosque', 'praying', "
+        "'quran', 'ramadan') DAN tetap nyambung sama isi/suasana slide-nya. "
+        "Contoh: konten soal sabar -> 'muslim man praying patience'; soal keluarga -> 'muslim family warmth'.\n"
+        "Fokus ke suasana/visual (bukan terjemahan harfiah), hindari tulisan/logo, utamakan natural light & tone lembut.\n"
         'Balas HANYA JSON object: {"keywords": ["...", "..."]} dengan panjang array PERSIS sama dengan jumlah slide.\n\n' + joined)
     data = ai_json(prompt)
     try:
