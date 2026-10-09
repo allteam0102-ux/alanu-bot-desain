@@ -793,10 +793,15 @@ Terjemahkan jadi penyesuaian angka. Setelan sekarang (1.0 = normal):
 - body_scale: ukuran teks BODY (batas 0.7-1.3)
 - scrim: kegelapan overlay di belakang teks (batas 0.6-1.6; naik = lebih gelap = teks lebih terbaca)
 - soft: kesan film/lembut pada gambar (batas 0.0-0.4; naik = lebih lembut/pudar; turun = lebih cerah/tajam)
-Catatan: kalau user minta ganti/ubah foto, cukup set action "revise" (foto otomatis diganti baru saat revisi).
+PENTING: hampir SEMUA masukan user = permintaan revisi -> set action "revise".
+Keluhan/komentar sekecil apapun soal desain (foto/teks/warna/overlay) = "revise".
+Contoh yang HARUS "revise": "gambar kurang bagus", "kurang aesthetic", "ganti foto",
+"fotonya jelek", "judul kegedean", "kurang jelas", "overlay kurang gelap".
+Kalau user komentarin/minta ganti foto, set action "revise" (foto otomatis diganti baru saat revisi).
+Pakai action "none" HANYA kalau pesan jelas cuma sapaan/basa-basi/terima kasih/pertanyaan umum
+(mis. "halo", "makasih", "lagi apa") — BUKAN komentar soal desain.
 Balas HANYA JSON valid, tanpa teks lain:
 {"head_scale_delta": <angka -0.12..0.12>, "body_scale_delta": <angka>, "scrim_delta": <angka>, "soft_delta": <angka>, "note": "<ringkasan singkat dalam bahasa Indonesia, maks 12 kata>", "action": "revise" atau "none"}
-Kalau pesan BUKAN instruksi revisi desain (misal cuma sapaan/ngobrol), set action "none" dan semua delta 0.
 Pesan user: "%s" """
 
 def ai_parse_command(text):
@@ -952,6 +957,13 @@ def process_feedback(mem):
             # ---- CHAT AI: perintah revisi bebas (ketik kalimat biasa) ----
             if text:
                 data = ai_parse_command(text)
+                # PENGAMAN: kalau AI bilang "none" TAPI teksnya jelas keluhan/minta ubah
+                # dan ada desain yang nunggu dinilai -> tetap anggap REVISI (biar AI nggak kelewat cuek)
+                _rev_kata = ("ganti", "ubah", "revisi", "perbaiki", "kurang", "jelek", "buram",
+                             "norak", "kegedean", "kekecilan", "lebih ", "jangan", "terlalu")
+                if (data and data.get("action") == "none"
+                        and any(k in low for k in _rev_kata) and _latest_pending(mem)):
+                    data["action"] = "revise"
                 if data and data.get("action") == "none":
                     tg_message("Oke, dicatat 🙂 Kalau mau gw revisi, kasih tau yang perlu diubah ya "
                                "(misal: “judul kekecilan”, “overlay kurang gelap”, “ganti foto lebih cerah”).")
