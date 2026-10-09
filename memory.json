@@ -2,26 +2,28 @@
   "preferences": {
     "head_scale": 1.0,
     "body_scale": 1.0,
-    "scrim": 1.0,
+    "scrim": 1.1,
     "soft": 0.0
   },
   "pending": {
-    "06eac477": {
+    "419c872d": {
       "title": "uji coba 1",
       "page_id": "3eb73ea7-af03-80c8-993b-c0aba17f1b2e",
-      "ts": 1791562253,
-      "revision": 0
+      "ts": 1791562759,
+      "revision": 1
     }
   },
-  "resolved": [],
+  "resolved": [
+    "06eac477"
+  ],
   "awaiting_text": null,
   "revise_queue": {},
   "log": [],
   "stats": {
     "approved": 0,
-    "rejected": 0,
+    "rejected": 1,
     "weekly": []
   },
-  "tg_offset": 289506794,
-  "_last_processed": 0
+  "tg_offset": 289506795,
+  "_last_processed": 1
 }
