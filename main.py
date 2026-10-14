@@ -217,7 +217,8 @@ def get_title(props):
 # ======================================================================
 def split_slides(content_text):
     raw = (content_text or "").replace("\r\n", "\n").replace("\r", "\n")
-    blocks = re.split(r"(?m)^\s*(?:[-–—]{2,}|[–—])\s*$", raw)
+    # Pemisah slide: baris 'Slide 1/2/3...' ATAU baris '---' / dash.
+    blocks = re.split(r"(?mi)^\s*(?:slide\s*\d+\s*[:.)\-]?|[-–—]{2,}|[–—])\s*$", raw)
     return [b.strip() for b in blocks if b.strip()]
 
 def split_urls(text):
