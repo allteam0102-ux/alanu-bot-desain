@@ -1165,16 +1165,10 @@ def process_feedback(mem):
                             ch = apply_example(prefs, res)
                             note = (res.get("note") or "").strip()
                             if ch:
-                                latest = _latest_pending(mem)
-                                tail = ""
-                                if latest:
-                                    tok, rec = latest
-                                    _queue_revision(mem, rec, "contoh foto: " + (note or "niru gaya"),
-                                                    new_photo=False, slides=[])
-                                    mem["pending"].pop(tok, None); _mark_resolved(mem, tok)
-                                    tail = f"\nSekalian gw revisi '{rec.get('title','desain')}' pake gaya ini ya."
                                 tg_message(f"🧠 Dapet gayanya! {note}\n"
-                                           f"Setelan gw sesuaiin → {prefs_summary(prefs)}{tail}")
+                                           f"Setelan gw simpen & kepake di desain BERIKUTNYA → {prefs_summary(prefs)}\n"
+                                           f"Mau konten tertentu diulang pake gaya ini? Set statusnya ke "
+                                           f"'Siap Desain' di Notion ya 🙂")
                             else:
                                 tg_message(f"👀 Gw lihat fotonya ({note or 'oke'}). Gayanya udah mirip sama "
                                            f"setelan sekarang, jadi nggak ada yang perlu diubah 🙂")
