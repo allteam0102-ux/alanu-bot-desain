@@ -778,6 +778,26 @@ def tg_answer_callback(cb_id, text=""):
     except Exception:
         pass
 
+def tg_get_file_path(file_id):
+    """Ambil path internal file Telegram dari file_id (buat download foto yg dikirim user)."""
+    try:
+        r = requests.get(f"{TG_BASE}/getFile", params={"file_id": file_id}, timeout=30)
+        j = r.json()
+        return j["result"]["file_path"] if j.get("ok") else None
+    except Exception as e:
+        print("    ! getFile error:", e); return None
+
+def tg_download_file(file_path, out_path):
+    """Download file dari server Telegram ke lokal."""
+    try:
+        url = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+        r = requests.get(url, timeout=60); r.raise_for_status()
+        with open(out_path, "wb") as f:
+            f.write(r.content)
+        return out_path
+    except Exception as e:
+        print("    ! download file error:", e); return None
+
 
 # ======================================================================
 # 8b. SISTEM BELAJAR — memori + feedback (approve/reject + alasan)
@@ -959,6 +979,24 @@ def apply_ai(prefs, data):
             changed.append(knob)
     return changed
 
+def apply_example(prefs, data):
+    """Terapkan setelan HASIL BACA foto contoh (nilai ABSOLUT, bukan delta)."""
+    changed = []
+    plan = [("head_scale", 0.7, 1.3), ("body_scale", 0.7, 1.3),
+            ("scrim", 0.6, 1.6), ("soft", 0.0, 0.4)]
+    for knob, lo, hi in plan:
+        v = (data or {}).get(knob)
+        if v is None:
+            continue
+        try:
+            v = _clamp(float(v), lo, hi)
+        except Exception:
+            continue
+        if abs(v - float(prefs.get(knob, 1.0))) >= 0.02:
+            prefs[knob] = v
+            changed.append(knob)
+    return changed
+
 def _latest_pending(mem):
     best = None
     for tok, rec in mem.get("pending", {}).items():
@@ -1035,6 +1073,26 @@ def ai_vision_check(image_path, zone, theme):
         return None
     return {"ok": bool(data.get("ok", True)), "issue": str(data.get("issue") or "").strip()}
 
+def ai_learn_from_example(image_path):
+    """Baca FOTO CONTOH yg dikirim user -> tangkap 'vibe'-nya jadi setelan (knob).
+    Kembalikan {head_scale, body_scale, scrim, soft, note} atau None kalau gagal."""
+    if not GEMINI_API_KEY:
+        return None
+    prompt = (
+        "Kamu art director. Ini FOTO CONTOH desain konten Instagram yang DISUKAI user; "
+        "dia mau desain berikutnya bergaya mirip ini.\n"
+        "Bandingkan dengan desain 'normal' (semua nilai 1.0 = normal), lalu perkirakan setelannya dari yg kamu LIHAT:\n"
+        "- head_scale: ukuran JUDUL (0.7 kecil .. 1.3 besar)\n"
+        "- body_scale: ukuran teks ISI (0.7 .. 1.3)\n"
+        "- scrim: kegelapan lapisan gelap di belakang teks (0.6 terang .. 1.6 gelap pekat)\n"
+        "- soft: kesan lembut/pudar foto (0.0 tajam/kontras .. 0.4 lembut/film)\n"
+        "Kasih angka sewajarnya (jangan semua 1.0 kalau memang keliatan beda).\n"
+        'Balas HANYA JSON: {"head_scale": <angka>, "body_scale": <angka>, "scrim": <angka>, '
+        '"soft": <angka>, "note": "<ciri gaya foto ini, bahasa Indonesia, maks 15 kata>"}'
+    )
+    data = _gemini_vision_json(prompt, image_path)
+    return data if isinstance(data, dict) else None
+
 def _queue_revision(mem, rec, reason_label, new_photo=False, slides=None):
     """Masukkan konten ke antrian revisi (biar run berikutnya di-generate ulang).
     new_photo=True -> foto dicari baru; False -> foto lama (cache) dipakai lagi.
@@ -1086,6 +1144,47 @@ def process_feedback(mem):
         # ---- pesan teks: perintah stats / reset / revisi bebas (AI) ----
         msg = up.get("message")
         if msg:
+            # ---- FOTO CONTOH: bot belajar "vibe" dari gambar yg dikirim user ----
+            photo = msg.get("photo")
+            doc = msg.get("document")
+            is_img_doc = bool(doc) and str(doc.get("mime_type", "")).startswith("image/")
+            if photo or is_img_doc:
+                file_id = (photo[-1]["file_id"] if photo else doc["file_id"])
+                if not GEMINI_API_KEY:
+                    tg_message("Buat belajar dari foto contoh, bot butuh 'mata' (Gemini). "
+                               "Setel dulu GEMINI_API_KEY-nya ya 🙏")
+                    processed += 1; continue
+                ok = False
+                fp = tg_get_file_path(file_id)
+                if fp:
+                    tmp = os.path.join(tempfile.gettempdir(), f"contoh_{int(time.time()*1000)}.jpg")
+                    if tg_download_file(fp, tmp):
+                        tg_message("👀 Oke, gw lagi 'lihat' foto contohnya bentar…")
+                        res = ai_learn_from_example(tmp)
+                        if res:
+                            ch = apply_example(prefs, res)
+                            note = (res.get("note") or "").strip()
+                            if ch:
+                                latest = _latest_pending(mem)
+                                tail = ""
+                                if latest:
+                                    tok, rec = latest
+                                    _queue_revision(mem, rec, "contoh foto: " + (note or "niru gaya"),
+                                                    new_photo=False, slides=[])
+                                    mem["pending"].pop(tok, None); _mark_resolved(mem, tok)
+                                    tail = f"\nSekalian gw revisi '{rec.get('title','desain')}' pake gaya ini ya."
+                                tg_message(f"🧠 Dapet gayanya! {note}\n"
+                                           f"Setelan gw sesuaiin → {prefs_summary(prefs)}{tail}")
+                            else:
+                                tg_message(f"👀 Gw lihat fotonya ({note or 'oke'}). Gayanya udah mirip sama "
+                                           f"setelan sekarang, jadi nggak ada yang perlu diubah 🙂")
+                            ok = True
+                if not ok:
+                    tg_message("Hmm, gw gagal baca foto contohnya (mungkin kuota AI penuh / foto rusak). "
+                               "Coba kirim ulang bentar lagi ya 🙏")
+                processed += 1
+                continue
+
             text = (msg.get("text") or "").strip()
             low = text.lower()
             mem["awaiting_text"] = None   # fitur lama nggak dipakai lagi
