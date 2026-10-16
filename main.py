@@ -855,7 +855,7 @@ def prefs_summary(prefs):
 
 # ---------- OTAK AI: Groq (utama) + Gemini (cadangan). Dua-duanya gratis ----------
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL    = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
+GEMINI_MODEL    = os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash"
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL      = os.environ.get("GROQ_MODEL") or "openai/gpt-oss-20b"
 AI_CHAT_ENABLED = ((os.environ.get("AI_CHAT_ENABLED") or "true").lower() == "true"
