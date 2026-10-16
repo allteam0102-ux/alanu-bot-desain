@@ -1164,14 +1164,29 @@ def process_feedback(mem):
                         if res:
                             ch = apply_example(prefs, res)
                             note = (res.get("note") or "").strip()
-                            if ch:
-                                tg_message(f"🧠 Dapet gayanya! {note}\n"
-                                           f"Setelan gw simpen & kepake di desain BERIKUTNYA → {prefs_summary(prefs)}\n"
-                                           f"Mau konten tertentu diulang pake gaya ini? Set statusnya ke "
-                                           f"'Siap Desain' di Notion ya 🙂")
+                            # cari desain buat LANGSUNG direvisi: yg lagi nunggu dinilai, atau yg terakhir dibuat
+                            rec = None
+                            latest = _latest_pending(mem)
+                            if latest:
+                                tok, rec = latest
+                                mem["pending"].pop(tok, None); _mark_resolved(mem, tok)
                             else:
-                                tg_message(f"👀 Gw lihat fotonya ({note or 'oke'}). Gayanya udah mirip sama "
-                                           f"setelan sekarang, jadi nggak ada yang perlu diubah 🙂")
+                                lp = mem.get("last_page") or {}
+                                if lp.get("page_id"):
+                                    rec = {"title": lp.get("title", "desain"),
+                                           "page_id": lp.get("page_id"), "revision": 0}
+                            if rec and rec.get("page_id"):
+                                _queue_revision(mem, rec, "contoh foto: " + (note or "niru gaya"),
+                                                new_photo=False, slides=[])
+                                tg_message(f"🧠 Dapet gayanya! {note}\n"
+                                           f"Setelan: {prefs_summary(prefs)}\n"
+                                           f"Gw langsung revisi '{rec.get('title','desain')}' pake gaya ini ya 🎨\n"
+                                           f"(Kalau yg mau diubah konten LAIN, set statusnya ke 'Siap Desain' di Notion.)")
+                            else:
+                                tg_message(f"🧠 Dapet gayanya! {note}\n"
+                                           f"Setelan gw simpen → {prefs_summary(prefs)}\n"
+                                           f"Tapi belum ada desain yg bisa gw revisi. Aktifin 1 konten dulu "
+                                           f"(set status 'Siap Desain' di Notion), nanti gayanya kepake 🙂")
                             ok = True
                 if not ok:
                     tg_message("Hmm, gw gagal baca foto contohnya (mungkin kuota AI penuh / foto rusak). "
@@ -1427,6 +1442,7 @@ def process_page(page, workdir, mem=None, revision=None):
         mem.setdefault("design_cache", {})[pid_norm] = {
             "hash": content_hash, "n": total, "title": title,
             "slides": slide_cache, "ts": int(time.time())}
+        mem["last_page"] = {"page_id": page_id, "title": title, "ts": int(time.time())}
 
     # --- CEK MANDIRI (AI vision) — CUKUP slide COVER biar hemat kuota gratis Gemini ---
     if slides_data:
