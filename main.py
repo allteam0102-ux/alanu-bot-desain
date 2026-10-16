@@ -52,8 +52,8 @@ CANVAS_W = int(os.environ.get("CANVAS_W") or 1080)
 CANVAS_H = int(os.environ.get("CANVAS_H") or 1350)
 
 OUTPUT_PPTX = (os.environ.get("OUTPUT_PPTX") or "true").lower() == "true"
-OUTPUT_SVG  = (os.environ.get("OUTPUT_SVG")  or "true").lower() == "true"
-OUTPUT_SVG_PER_SLIDE = (os.environ.get("OUTPUT_SVG_PER_SLIDE") or "true").lower() == "true"
+OUTPUT_SVG  = (os.environ.get("OUTPUT_SVG") or "false").lower() == "true"
+OUTPUT_SVG_PER_SLIDE = (os.environ.get("OUTPUT_SVG_PER_SLIDE") or "false").lower() == "true"
 OUTPUT_HTML = (os.environ.get("OUTPUT_HTML") or "true").lower() == "true"
 
 # ----------------------------------------------------------------------
