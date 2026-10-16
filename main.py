@@ -876,6 +876,8 @@ def prefs_summary(prefs):
 # ---------- OTAK AI: Groq (utama) + Gemini (cadangan). Dua-duanya gratis ----------
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL    = os.environ.get("GEMINI_MODEL") or "gemini-3.5-flash"
+# model cadangan buat 'mata' (vision) kalau model utama lagi overload (503)
+GEMINI_VISION_FALLBACKS = [m.strip() for m in (os.environ.get("GEMINI_VISION_FALLBACKS") or "gemini-3.5-flash,gemini-3.6-flash").split(",") if m.strip()]
 GROQ_API_KEY    = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL      = os.environ.get("GROQ_MODEL") or "openai/gpt-oss-20b"
 AI_CHAT_ENABLED = ((os.environ.get("AI_CHAT_ENABLED") or "true").lower() == "true"
@@ -1027,6 +1029,31 @@ def ai_image_keywords(slide_texts):
         pass
     return None
 
+def _extract_json(resp):
+    """Ambil JSON dari balasan Gemini walau dibungkus teks/markdown (```json ... ```)."""
+    try:
+        raw = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        return None
+    raw = (raw or "").strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw[:4].lower() == "json":
+            raw = raw[4:]
+        raw = raw.strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    import re as _re
+    mobj = _re.search(r"\{.*\}", raw, _re.S)
+    if mobj:
+        try:
+            return json.loads(mobj.group(0))
+        except Exception:
+            return None
+    return None
+
 def _gemini_vision_json(prompt, image_path):
     """Kirim gambar + pertanyaan ke Gemini (mode 'mata'/vision), minta jawaban JSON.
     Gambar dikecilin dulu (max 640px, JPEG) biar payload kecil & cepat."""
@@ -1039,19 +1066,31 @@ def _gemini_vision_json(prompt, image_path):
         b64 = base64.b64encode(buf.getvalue()).decode()
     except Exception as e:
         print("    ! vision: gagal siapin gambar:", e); return None
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
     body = {"contents": [{"parts": [
                 {"text": prompt},
                 {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}],
             "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}}
-    try:
-        r = requests.post(url, json=body, timeout=60)
-        if r.status_code != 200:
-            print(f"    ! Gemini vision {r.status_code}: {r.text[:120]}")
-            return None
-        return json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
-    except Exception as e:
-        print("    ! Gemini vision gagal:", e); return None
+    # coba model utama, lalu cadangan; tiap model diulang kalau overload sesaat (5xx/429)
+    tried = []
+    for mdl in [GEMINI_MODEL] + [mm for mm in GEMINI_VISION_FALLBACKS if mm != GEMINI_MODEL]:
+        tried.append(mdl)
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent?key={GEMINI_API_KEY}"
+        for attempt in range(3):
+            try:
+                r = requests.post(url, json=body, timeout=60)
+            except Exception as e:
+                print(f"    ! Gemini vision {mdl} error:", e); break
+            if r.status_code == 200:
+                parsed = _extract_json(r)
+                if parsed is not None:
+                    return parsed
+                print(f"    ! Gemini vision {mdl}: 200 tapi JSON gagal diparse"); break
+            if r.status_code in (429, 500, 502, 503, 504):
+                print(f"    ! Gemini vision {mdl} {r.status_code} (overload, coba lagi {attempt+1}/3)")
+                time.sleep(1.5 * (attempt + 1)); continue
+            print(f"    ! Gemini vision {mdl} {r.status_code}: {r.text[:100]}"); break
+    print("    ! Gemini vision nyerah; model dicoba:", tried)
+    return None
 
 def ai_vision_check(image_path, zone, theme):
     """Cek mandiri: kirim foto COVER slide ke Gemini, tanya apakah teks bakal mudah dibaca.
