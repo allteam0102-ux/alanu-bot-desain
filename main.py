@@ -465,10 +465,19 @@ def record_photos_used(mem, ids):
         if pid:
             hist[str(pid)] = now
 
-def _pin_hires(url):
-    """Ganti ukuran thumbnail Pinterest (/236x/ dll) jadi /originals/ biar resolusi gede."""
+def _pin_sizes(url):
+    """Daftar kandidat URL dari yg resolusi GEDE ke kecil: originals -> 736x -> aslinya (236x)."""
     import re as _re
-    return _re.sub(r"/\d+x\d*/", "/originals/", url) if url else url
+    if not url:
+        return []
+    cands = []
+    for size in ("originals", "736x"):
+        c = _re.sub(r"/\d+x\d*/", f"/{size}/", url)
+        if c not in cands:
+            cands.append(c)
+    if url not in cands:
+        cands.append(url)
+    return cands
 
 def pinterest_pick(used_ids):
     """Ambil foto dari RSS board Pinterest pribadi (PINTEREST_RSS). None kalau mati/kosong.
@@ -501,7 +510,7 @@ def pinterest_pick(used_ids):
             fresh = [(k, u) for k, u in uniq if str(k) not in used_ids] or uniq
             key, u = random.choice(fresh)
             used_ids.add(str(key))
-            for cand in (_pin_hires(u), u):
+            for cand in _pin_sizes(u):
                 try:
                     data = requests.get(cand, headers=UA, timeout=60).content
                     Image.open(io.BytesIO(data)).verify()
