@@ -179,6 +179,10 @@ TELEGRAM_CHAT_ID    = env("TELEGRAM_CHAT_ID", required=True)
 PEXELS_API_KEY      = os.environ.get("PEXELS_API_KEY", "")        # buat auto (kalau tak tempel link)
 UNSPLASH_ACCESS_KEY = os.environ.get("UNSPLASH_ACCESS_KEY", "")   # buat auto
 PIXABAY_API_KEY     = os.environ.get("PIXABAY_API_KEY", "")       # buat auto (sumber tambahan)
+# PINTEREST (board pribadi) — daftar URL RSS board, dipisah koma. Diutamakan kalau diisi.
+# contoh: https://www.pinterest.com/USERNAME/NAMA-BOARD.rss  (atau /feed.rss utk semua pin)
+PINTEREST_RSS       = [u.strip() for u in (os.environ.get("PINTEREST_RSS") or "").split(",") if u.strip()]
+PINTEREST_FIRST     = (os.environ.get("PINTEREST_FIRST") or "true").lower() == "true"
 STYLE_HINT          = os.environ.get("STYLE_HINT") or "cinematic moody aesthetic silhouette dramatic light"
 # bias Islami: kata yg ditambahkan biar hasil foto tetap bernuansa muslim/islami
 ISLAMIC_HINT        = os.environ.get("ISLAMIC_HINT") or "muslim islamic"
@@ -461,8 +465,66 @@ def record_photos_used(mem, ids):
         if pid:
             hist[str(pid)] = now
 
+def _pin_hires(url):
+    """Ganti ukuran thumbnail Pinterest (/236x/ dll) jadi /originals/ biar resolusi gede."""
+    import re as _re
+    return _re.sub(r"/\d+x\d*/", "/originals/", url) if url else url
+
+def pinterest_pick(used_ids):
+    """Ambil foto dari RSS board Pinterest pribadi (PINTEREST_RSS). None kalau mati/kosong.
+    Aman: kalau gagal, pemanggilnya lanjut ke sumber stok."""
+    if not PINTEREST_RSS:
+        return None
+    import re as _re
+    feeds = list(PINTEREST_RSS); random.shuffle(feeds)
+    for feed in feeds:
+        try:
+            r = requests.get(feed, headers=UA, timeout=60)
+            if r.status_code != 200 or "<item" not in r.text:
+                print(f"    ! Pinterest RSS '{feed}' status {r.status_code} / bukan feed valid")
+                continue
+            txt = r.text
+            imgs  = _re.findall(r'<media:content[^>]+url="([^"]+)"', txt)
+            imgs += _re.findall(r'<enclosure[^>]+url="([^"]+)"', txt)
+            imgs += _re.findall(r'&lt;img[^&]*?src=&quot;([^&]+?)&quot;', txt)   # <img> di description yg ter-escape
+            imgs += _re.findall(r'<img[^>]+src="([^"]+)"', txt)
+            imgs = [u for u in imgs if "pinimg.com" in u]
+            if not imgs:
+                print(f"    ! Pinterest RSS '{feed}' nggak ada gambar pinimg")
+                continue
+            seen, uniq = set(), []
+            for u in imgs:
+                key = u.split("/")[-1].split("?")[0]
+                if key in seen:
+                    continue
+                seen.add(key); uniq.append((key, u))
+            fresh = [(k, u) for k, u in uniq if str(k) not in used_ids] or uniq
+            key, u = random.choice(fresh)
+            used_ids.add(str(key))
+            for cand in (_pin_hires(u), u):
+                try:
+                    data = requests.get(cand, headers=UA, timeout=60).content
+                    Image.open(io.BytesIO(data)).verify()
+                    return data
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"    ! Pinterest RSS '{feed}' gagal: {e}")
+    return None
+
 def auto_image_bytes(query, used_ids):
-    """Ambil otomatis (tanpa link): Pixabay + Pexels + Unsplash. Semua dibias Islami + sesuai konteks."""
+    """Ambil otomatis (tanpa link). URUTAN: Pinterest board pribadi dulu (kalau diisi),
+    baru Pixabay + Pexels + Unsplash. Semua dibias Islami + sesuai konteks."""
+    # 0) PINTEREST (board pribadi) diutamakan
+    if PINTEREST_RSS and PINTEREST_FIRST:
+        try:
+            data = pinterest_pick(used_ids)
+            if data:
+                print("    [sumber foto: Pinterest board kamu]")
+                return data
+            print("    (Pinterest kosong/mati -> lanjut ke stok)")
+        except Exception as e:
+            print("    ! Pinterest gagal, lanjut ke stok:", e)
     picker = {"unsplash": unsplash_pick, "pexels": pexels_pick, "pixabay": pixabay_pick}
     sources = []
     if PIXABAY_API_KEY:     sources.append("pixabay")
