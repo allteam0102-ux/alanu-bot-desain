@@ -1181,18 +1181,21 @@ def local_parse_command(text):
         if hit_judul or both: d["head_scale_delta"] -= 0.12
         if hit_body  or both: d["body_scale_delta"] -= 0.10
         notes.append("teks dikecilin")
-    if has("kekecilan", "kecil banget", "terlalu kecil", "gedein", "perbesar", "besarin", "lebih besar", "lebih gede"):
+    if has("kekecilan", "kecil banget", "terlalu kecil", "gedein", "perbesar", "besarin", "lebih besar", "lebih gede",
+           "kurang besar", "kurang gede", "kurang gedhe", "krg besar"):
         if hit_judul or both: d["head_scale_delta"] += 0.12
         if hit_body  or both: d["body_scale_delta"] += 0.10
         notes.append("teks digedein")
     if has("lebih soft", "lebih lembut", "lebih pudar", "lembutin", "vintage"):
         d["soft_delta"] += 0.10; notes.append("foto dibikin lembut")
-    if has("lebih cerah", "lebih terang", "lebih tajam", "cerahin", "terangin", "tajamin", "jangan pudar"):
+    if has("lebih cerah", "lebih terang", "lebih tajam", "cerahin", "terangin", "tajamin", "jangan pudar",
+           "kurang terang", "kurang cerah", "kurang nyala"):
         d["soft_delta"] -= 0.10; notes.append("foto dibikin cerah")
     if has("jangan bold", "ga bold", "gak bold", "nggak bold", "tanpa bold", "jangan tebal", "jangan tebel",
            "nggak tebal", "tipisin", "tipis", "jangan ada yang bold", "nggak ada yang bold"):
         d["head_bold"] = False; notes.append("judul dibikin tipis")
-    elif has("dibold", "di bold", "pakai bold", "tebelin", "tebalin", "dipertebal", "pertebal", "judul tebal", "bold lagi"):
+    elif has("dibold", "di bold", "pakai bold", "tebelin", "tebalin", "dipertebal", "pertebal", "judul tebal", "bold lagi",
+             "kurang tebal", "kurang tebel", "kurang bold"):
         d["head_bold"] = True; notes.append("judul dibikin tebal")
     if has("ganti foto", "ganti gambar", "foto baru", "gambar baru", "foto jelek", "gambar jelek",
            "foto kurang", "gambar kurang", "foto nggak", "gambar nggak", "aesthetic", "estetik",
@@ -1214,11 +1217,18 @@ def _merge_cmd(ai_data, local):
         return local
     for k in ("head_scale_delta", "body_scale_delta", "scrim_delta", "soft_delta"):
         try:
-            if abs(float(ai_data.get(k, 0) or 0)) < 0.01 and abs(float(local.get(k, 0) or 0)) >= 0.01:
-                ai_data[k] = local[k]
+            if abs(float(local.get(k, 0) or 0)) >= 0.01:
+                ai_data[k] = local[k]          # lokal override (lebih bisa dipercaya drpd AI)
         except Exception:
             pass
-    if ai_data.get("head_bold", None) is None and local.get("head_bold", None) is not None:
+    local_size = (abs(local.get("head_scale_delta", 0) or 0) >= 0.01
+                  or abs(local.get("body_scale_delta", 0) or 0) >= 0.01)
+    if local_size:
+        if abs(local.get("head_scale_delta", 0) or 0) < 0.01:
+            ai_data["head_scale_delta"] = 0.0
+        if abs(local.get("body_scale_delta", 0) or 0) < 0.01:
+            ai_data["body_scale_delta"] = 0.0
+    if local.get("head_bold", None) is not None:
         ai_data["head_bold"] = local["head_bold"]
     if not ai_data.get("new_photo") and local.get("new_photo"):
         ai_data["new_photo"] = True
