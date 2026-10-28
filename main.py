@@ -550,10 +550,165 @@ def auto_image_bytes(query, used_ids):
                 print(f"    ! {src} gagal ('{_islamic_q(q)}'): {e}")
     return None
 
-def make_bw_photo(img_bytes, out_path, clean_out=None, full_out=None):
+# ======================================================================
+# AUTO-CROP CERDAS (3 lapis): AI focus -> deteksi wajah -> saliency -> crop tengah
+# ======================================================================
+SMART_CROP_ENABLED = (os.environ.get("SMART_CROP") or "true").lower() == "true"
+
+def _box_crop_wh(im, box_px, w, h):
+    """Crop im jadi rasio w:h, se-ketat mungkin TAPI wajib memuat box_px (x0,y0,x1,y1).
+    Balikin (cropped_resized, rect_fraksi)."""
+    target = w / h
+    W, H = im.size
+    bx0, by0, bx1, by1 = box_px
+    bw = max(1.0, bx1 - bx0); bh = max(1.0, by1 - by0)
+    cx = (bx0 + bx1) / 2.0; cy = (by0 + by1) / 2.0
+    cw = max(bw, bh * target); ch = cw / target
+    if ch < bh:
+        ch = bh; cw = ch * target
+    cw = min(cw, W); ch = min(ch, H)
+    if cw / ch > target:
+        cw = ch * target
+    else:
+        ch = cw / target
+    x0 = cx - cw / 2.0; y0 = cy - ch / 2.0
+    x0 = max(0, min(W - cw, x0)); y0 = max(0, min(H - ch, y0))
+    im2 = im.crop((int(round(x0)), int(round(y0)), int(round(x0 + cw)), int(round(y0 + ch))))
+    rect = (x0 / W, y0 / H, (x0 + cw) / W, (y0 + ch) / H)
+    return im2.resize((w, h), Image.LANCZOS), rect
+
+def ai_focus_box(image_path, context):
+    """Tanya MATA AI (Gemini): bagian foto mana yg PALING nyambung konteks. (x,y,w,h) fraksi atau None."""
+    if not GEMINI_API_KEY:
+        return None
+    prompt = (
+        "Kamu fotografer/editor. Ini satu FOTO untuk konten Instagram.\n"
+        f"Konteks/topik slide: \"{(context or '').strip()[:200]}\".\n"
+        "Tentukan KOTAK bagian foto yang PALING relevan & penting untuk konteks ini "
+        "(boleh objek/subjek yang paling nyambung dengan topik, BUKAN selalu yang paling menonjol). "
+        "Jaga wajah/objek penting tetap utuh (jangan kepotong).\n"
+        "Nilai dalam FRAKSI 0..1 relatif ukuran foto: x,y = pojok kiri-atas kotak; w,h = lebar,tinggi.\n"
+        'Balas HANYA JSON: {"x":<0..1>,"y":<0..1>,"w":<0..1>,"h":<0..1>}'
+    )
+    d = _gemini_vision_json(prompt, image_path)
+    try:
+        x = float(d["x"]); y = float(d["y"]); w = float(d["w"]); h = float(d["h"])
+    except Exception:
+        return None
+    if not (0 <= x <= 1 and 0 <= y <= 1 and 0 < w <= 1 and 0 < h <= 1):
+        return None
+    if x + w > 1: w = 1 - x
+    if y + h > 1: h = 1 - y
+    return (x, y, w, h)
+
+def _face_box(im):
+    """Deteksi wajah (depan + samping) pakai OpenCV. None kalau nggak ada / cv2 belum keinstall."""
+    try:
+        import cv2, numpy as np
+    except Exception:
+        return None
+    try:
+        arr = np.array(im.convert("RGB"))[:, :, ::-1]
+        gray = cv2.cvtColor(arr, cv2.COLOR_BGR2GRAY)
+        boxes = []
+        for xml in ("haarcascade_frontalface_default.xml", "haarcascade_profileface.xml"):
+            c = cv2.CascadeClassifier(cv2.data.haarcascades + xml)
+            if c.empty():
+                continue
+            for (x, y, w, h) in c.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40)):
+                boxes.append((int(x), int(y), int(w), int(h)))
+        if not boxes:
+            return None
+        H, W = gray.shape[:2]
+        x0 = min(b[0] for b in boxes); y0 = min(b[1] for b in boxes)
+        x1 = max(b[0] + b[2] for b in boxes); y1 = max(b[1] + b[3] for b in boxes)
+        return (x0 / W, y0 / H, (x1 - x0) / W, (y1 - y0) / H)
+    except Exception as e:
+        print("    ! deteksi wajah gagal:", e)
+        return None
+
+def _saliency_box(im):
+    """Fokus berbasis 'keramaian detail' (edge energy) pakai numpy saja — jalan walau opencv nggak ada."""
+    try:
+        import numpy as np
+        ww = 200; hh = max(1, int(ww * im.size[1] / max(1, im.size[0])))
+        g = np.asarray(im.convert("L").resize((ww, hh)), dtype=np.float32)
+        gx = np.pad(np.abs(np.diff(g, axis=1)), ((0, 0), (0, 1)))
+        gy = np.pad(np.abs(np.diff(g, axis=0)), ((0, 1), (0, 0)))
+        energy = gx + gy
+        total = float(energy.sum())
+        if total < 1.0:
+            return None
+        H, W = energy.shape
+        yy, xx = np.indices((H, W))
+        cx = float((xx * energy).sum() / total) / W
+        cy = float((yy * energy).sum() / total) / H
+        sx = (float(((xx / W - cx) ** 2 * energy).sum() / total)) ** 0.5
+        sy = (float(((yy / H - cy) ** 2 * energy).sum() / total)) ** 0.5
+        hw = min(0.5, max(0.18, 2.0 * sx)); hh2 = min(0.5, max(0.18, 2.0 * sy))
+        x0 = max(0.0, cx - hw); y0 = max(0.0, cy - hh2)
+        x1 = min(1.0, cx + hw); y1 = min(1.0, cy + hh2)
+        if (x1 - x0) >= 0.96 and (y1 - y0) >= 0.96:
+            return None
+        return (x0, y0, x1 - x0, y1 - y0)
+    except Exception as e:
+        print("    ! saliency gagal:", e)
+        return None
+
+def local_focus_box(im):
+    """Fokus LOKAL (gratis): utamakan WAJAH; kalau nggak ada, pakai area paling ramai detail."""
+    return _face_box(im) or _saliency_box(im)
+
+def smart_crop_to(im, w, h, context=""):
+    """Crop ke (w,h), 3 lapis: 1) AI (konteks) kalau nyala & kuota; 2) WAJAH lokal (gratis);
+    3) crop tengah. Balikin (image, metode 'ai'/'lokal'/None, rect_fraksi atau None)."""
+    if SMART_CROP_ENABLED and context and GEMINI_API_KEY:
+        tmp = None
+        try:
+            fd, tmp = tempfile.mkstemp(suffix=".jpg"); os.close(fd)
+            im.convert("RGB").save(tmp, "JPEG", quality=88)
+            box = ai_focus_box(tmp, context)
+            if box:
+                W, H = im.size; x, y, bw, bh = box; pad = 0.10
+                bx0 = max(0, (x - pad) * W); by0 = max(0, (y - pad) * H)
+                bx1 = min(W, (x + bw + pad) * W); by1 = min(H, (y + bh + pad) * H)
+                if bx1 - bx0 >= 8 and by1 - by0 >= 8:
+                    print(f"    [smart-crop] AI fokus box={tuple(round(v, 2) for v in box)}")
+                    cropped, rect = _box_crop_wh(im, (bx0, by0, bx1, by1), w, h)
+                    return cropped, "ai", rect
+        except Exception as e:
+            print("    ! smart-crop AI gagal:", e)
+        finally:
+            try:
+                if tmp and os.path.exists(tmp): os.remove(tmp)
+            except Exception:
+                pass
+    if SMART_CROP_ENABLED:
+        try:
+            fb = local_focus_box(im)
+            if fb:
+                W, H = im.size; x, y, bw, bh = fb; pad = 0.18
+                bx0 = max(0, (x - pad) * W); by0 = max(0, (y - pad) * H)
+                bx1 = min(W, (x + bw + pad) * W); by1 = min(H, (y + bh + pad) * H)
+                if bx1 - bx0 >= 8 and by1 - by0 >= 8:
+                    print("    [smart-crop] pakai fokus LOKAL (wajah/saliency)")
+                    cropped, rect = _box_crop_wh(im, (bx0, by0, bx1, by1), w, h)
+                    return cropped, "lokal", rect
+        except Exception as e:
+            print("    ! crop lokal gagal:", e)
+    # crop tengah biasa
+    W, H = im.size; target = w / h
+    if W / H > target:
+        nw = int(H * target); x = (W - nw) // 2; im2 = im.crop((x, 0, x + nw, H))
+        rect = (x / W, 0.0, (x + nw) / W, 1.0)
+    else:
+        nh = int(W / target); y = (H - nh) // 2; im2 = im.crop((0, y, W, y + nh))
+        rect = (0.0, y / H, 1.0, (y + nh) / H)
+    return im2.resize((w, h), Image.LANCZOS), rect
+
+def make_bw_photo(img_bytes, out_path, clean_out=None, full_out=None, context=""):
     src = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     PH = int(CANVAS_H * PHOTO_FRAC)
-    target = CANVAS_W / PH
     # FOTO UTUH B&W (nggak di-crop ke band) buat crop editable di Figma lewat HTML
     if full_out:
         try:
@@ -562,13 +717,8 @@ def make_bw_photo(img_bytes, out_path, clean_out=None, full_out=None):
             full_bw.convert("RGB").save(full_out, "PNG")
         except Exception as _e:
             print("    ! simpan foto utuh gagal:", _e)
-    im = src
-    w, h = im.size
-    if w / h > target:
-        nw = int(h * target); x = (w - nw) // 2; im = im.crop((x, 0, x + nw, h))
-    else:
-        nh = int(w / target); y = (h - nh) // 2; im = im.crop((0, y, w, y + nh))
-    im = im.resize((CANVAS_W, PH), Image.LANCZOS)
+    # AUTO-CROP cerdas ke band (ganti crop tengah). rect = posisi crop (buat HTML editable).
+    im, _method, crop_rect = smart_crop_to(src, CANVAS_W, PH, context)
     gray = ImageOps.autocontrast(ImageOps.grayscale(im), cutoff=1)
     try:
         grain = Image.effect_noise((CANVAS_W, PH), 22)
@@ -589,7 +739,7 @@ def make_bw_photo(img_bytes, out_path, clean_out=None, full_out=None):
         draw.line([(0, y), (CANVAS_W, y)], fill=(0, 0, 0, int(110 * (1 - y / top_h))))
     photo = Image.alpha_composite(photo.convert("RGBA"), overlay).convert("RGB")
     photo.save(out_path, "PNG")
-    return out_path
+    return crop_rect   # posisi crop (fraksi) di foto utuh -> buat crop editable di Figma (HTML)
 
 
 # ======================================================================
@@ -842,11 +992,19 @@ def build_html(slides_data, out_path, logo_path):
     body_parts = ['<div class="wrap">']
     for s in slides_data:
         panel_bg, head_c, body_c = theme_colors(s["theme"])
-        # foto UTUH (kalau ada) -> di Figma bisa di-recrop; cover reproduksi crop tengah
-        bgp = s.get("full_path") or s.get("clean_path") or s.get("image_path")
+        full_p = s.get("full_path"); rect = s.get("crop_rect")
         body_parts.append(f'<div class="slide" style="background:#{panel_bg}">')
         body_parts.append('<div class="photo">')
-        body_parts.append(f'<img class="bg" src="{_img_data_uri(bgp)}" alt="">')
+        if full_p and rect:
+            # FOTO UTUH + crop sbg frame -> tampil sama kaya hasil auto-crop, tapi di Figma bisa di-recrop
+            x0, y0, x1, y1 = rect
+            cw = max(1e-3, x1 - x0); ch = max(1e-3, y1 - y0)
+            st = (f"position:absolute;left:{-x0/cw*100:.3f}%;top:{-y0/ch*100:.3f}%;"
+                  f"width:{100/cw:.3f}%;height:{100/ch:.3f}%;max-width:none;object-fit:fill;filter:grayscale(1);")
+            body_parts.append(f'<img src="{_img_data_uri(full_p)}" alt="" style="{st}">')
+        else:
+            bgp = full_p or s.get("clean_path") or s.get("image_path")
+            body_parts.append(f'<img class="bg" src="{_img_data_uri(bgp)}" alt="">')
         body_parts.append('<div class="ov"></div>')   # masking terpisah dari foto
         body_parts.append('</div>')
         if logo_uri:
@@ -1695,6 +1853,7 @@ def process_page(page, workdir, mem=None, revision=None):
         img_path = os.path.join(workdir, f"slide_{i}.png")
         clean_path = os.path.join(workdir, f"slide_{i}_clean.png")
         full_path = os.path.join(workdir, f"slide_{i}_full.png") if OUTPUT_HTML else None   # foto UTUH (crop editable Figma)
+        crop_rect = None       # posisi auto-crop (fraksi) di foto utuh
 
         # pakai foto lama (cache)? ya, kalau slide ini BUKAN target foto baru & file cache ada
         reused = False
@@ -1712,7 +1871,8 @@ def process_page(page, workdir, mem=None, revision=None):
 
         if not reused:
             if url:                                   # ada link (Pinterest) -> pakai
-                make_bw_photo(fetch_image_bytes(url), img_path, clean_out=clean_path, full_out=full_path)
+                crop_rect = make_bw_photo(fetch_image_bytes(url), img_path, clean_out=clean_path,
+                                          full_out=full_path, context=(headline + " " + body))
             else:                                     # tak ada link -> auto Unsplash/Pexels
                 explicit = keyword_blocks[i - 1].strip() if (i - 1) < len(keyword_blocks) else ""
                 if explicit:
@@ -1731,7 +1891,8 @@ def process_page(page, workdir, mem=None, revision=None):
                         f"Tempel link di slide, isi 'Kata Kunci Gambar' (Inggris), "
                         f"atau isi secret UNSPLASH_ACCESS_KEY / PEXELS_API_KEY."
                     )
-                make_bw_photo(data, img_path, clean_out=clean_path, full_out=full_path)
+                crop_rect = make_bw_photo(data, img_path, clean_out=clean_path,
+                                          full_out=full_path, context=(headline + " " + body))
 
         has_clean = os.path.exists(clean_path)
 
@@ -1749,6 +1910,7 @@ def process_page(page, workdir, mem=None, revision=None):
         slides_data.append({"headline": headline, "body": body, "image_path": img_path,
                             "clean_path": (clean_path if has_clean else None),
                             "full_path": (full_path if (full_path and os.path.exists(full_path)) else None),
+                            "crop_rect": crop_rect,
                             "index": i, "total": total, "theme": theme})
 
     # catat metadata cache (buat cek kecocokan di revisi berikutnya)
