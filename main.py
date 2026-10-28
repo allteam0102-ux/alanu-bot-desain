@@ -718,7 +718,7 @@ def make_bw_photo(img_bytes, out_path, clean_out=None, full_out=None, context=""
         except Exception as _e:
             print("    ! simpan foto utuh gagal:", _e)
     # AUTO-CROP cerdas ke band (ganti crop tengah). rect = posisi crop (buat HTML editable).
-    im, _method, crop_rect = smart_crop_to(src, CANVAS_W, PH, context)
+    im, crop_method, crop_rect = smart_crop_to(src, CANVAS_W, PH, context)
     gray = ImageOps.autocontrast(ImageOps.grayscale(im), cutoff=1)
     try:
         grain = Image.effect_noise((CANVAS_W, PH), 22)
@@ -739,7 +739,7 @@ def make_bw_photo(img_bytes, out_path, clean_out=None, full_out=None, context=""
         draw.line([(0, y), (CANVAS_W, y)], fill=(0, 0, 0, int(110 * (1 - y / top_h))))
     photo = Image.alpha_composite(photo.convert("RGBA"), overlay).convert("RGB")
     photo.save(out_path, "PNG")
-    return crop_rect   # posisi crop (fraksi) di foto utuh -> buat crop editable di Figma (HTML)
+    return crop_rect, crop_method   # rect (crop editable Figma) + metode auto-crop ('ai'/'lokal'/None)
 
 
 # ======================================================================
@@ -1826,6 +1826,7 @@ def process_page(page, workdir, mem=None, revision=None):
 
     slides_data, preview_paths = [], []
     vision_notes = []           # catatan cek mandiri (AI vision) — cuma cover
+    smart_crop_slides = []      # (nomor slide, metode) yg berhasil auto-crop -> buat lapor Telegram
     # mulai dari daftar foto yg masih 'cooldown' (dipakai < 6 bln) -> otomatis dihindari
     used_ids = set(photo_block_set(mem)) if mem is not None else set()
     total = len(slide_blocks)
@@ -1871,8 +1872,9 @@ def process_page(page, workdir, mem=None, revision=None):
 
         if not reused:
             if url:                                   # ada link (Pinterest) -> pakai
-                crop_rect = make_bw_photo(fetch_image_bytes(url), img_path, clean_out=clean_path,
-                                          full_out=full_path, context=(headline + " " + body))
+                crop_rect, _cm = make_bw_photo(fetch_image_bytes(url), img_path, clean_out=clean_path,
+                                               full_out=full_path, context=(headline + " " + body))
+                if _cm: smart_crop_slides.append((i, _cm))
             else:                                     # tak ada link -> auto Unsplash/Pexels
                 explicit = keyword_blocks[i - 1].strip() if (i - 1) < len(keyword_blocks) else ""
                 if explicit:
@@ -1891,8 +1893,9 @@ def process_page(page, workdir, mem=None, revision=None):
                         f"Tempel link di slide, isi 'Kata Kunci Gambar' (Inggris), "
                         f"atau isi secret UNSPLASH_ACCESS_KEY / PEXELS_API_KEY."
                     )
-                crop_rect = make_bw_photo(data, img_path, clean_out=clean_path,
-                                          full_out=full_path, context=(headline + " " + body))
+                crop_rect, _cm = make_bw_photo(data, img_path, clean_out=clean_path,
+                                               full_out=full_path, context=(headline + " " + body))
+                if _cm: smart_crop_slides.append((i, _cm))
 
         has_clean = os.path.exists(clean_path)
 
@@ -1959,6 +1962,16 @@ def process_page(page, workdir, mem=None, revision=None):
             lines += ["", "🔎 Cek mandiri (cover): aman ✅"]
         else:
             lines += ["", "🔎 Cek mandiri: dilewati — kuota AI lagi penuh, nanti dicoba lagi"]
+    # laporan auto-crop (biar keliatan jalan apa nggak)
+    if smart_crop_slides:
+        _ai = [str(i) for i, mth in smart_crop_slides if mth == "ai"]
+        _lk = [str(i) for i, mth in smart_crop_slides if mth != "ai"]
+        seg = []
+        if _ai: seg.append(f"AI: slide {', '.join(_ai)}")
+        if _lk: seg.append(f"lokal(wajah/saliency): slide {', '.join(_lk)}")
+        lines += ["", "✂️ Auto-crop jalan — " + "; ".join(seg)]
+    else:
+        lines += ["", "✂️ Auto-crop: crop tengah (subjek nggak kedeteksi / foto polos)"]
     tg_message("\n".join(lines))
 
     for i, p in enumerate(preview_paths, start=1):
