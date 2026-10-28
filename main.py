@@ -655,9 +655,58 @@ def _saliency_box(im):
         print("    ! saliency gagal:", e)
         return None
 
+PERSON_DETECT = (os.environ.get("PERSON_DETECT") or "true").lower() == "true"
+_LAST_LOCAL = None
+
+def _person_box(im):
+    """Deteksi ORANG/badan pakai HOG+SVM bawaan OpenCV (nggak perlu download model)."""
+    if not PERSON_DETECT:
+        return None
+    try:
+        import cv2, numpy as np
+    except Exception:
+        return None
+    try:
+        arr = np.array(im.convert("RGB"))[:, :, ::-1]
+        H0, W0 = arr.shape[:2]
+        scale = 720.0 / max(1, W0)
+        small = cv2.resize(arr, (max(1, int(W0 * scale)), max(1, int(H0 * scale)))) if scale < 1 else arr
+        hog = cv2.HOGDescriptor()
+        hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        found = hog.detectMultiScale(small, winStride=(8, 8), padding=(8, 8), scale=1.05)
+        rects = list(found[0]) if (found is not None and len(found) and found[0] is not None) else []
+        weights = found[1] if (found is not None and len(found) > 1) else None
+        if not rects:
+            return None
+        if weights is not None and len(weights):
+            keep = [r for r, w in zip(rects, weights) if float(w) >= 0.5]
+            rects = keep or rects
+        Hs, Ws = small.shape[:2]
+        x0 = min(int(r[0]) for r in rects); y0 = min(int(r[1]) for r in rects)
+        x1 = max(int(r[0]) + int(r[2]) for r in rects); y1 = max(int(r[1]) + int(r[3]) for r in rects)
+        x0 = max(0, x0); y0 = max(0, y0); x1 = min(Ws, x1); y1 = min(Hs, y1)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return None
+        return (x0 / Ws, y0 / Hs, (x1 - x0) / Ws, (y1 - y0) / Hs)
+    except Exception as e:
+        print("    ! deteksi orang gagal:", e)
+        return None
+
+def _local_focus(im):
+    """WAJAH -> ORANG -> area paling ramai detail. Catat metode yg kena ke _LAST_LOCAL."""
+    global _LAST_LOCAL
+    b = _face_box(im)
+    if b: _LAST_LOCAL = "wajah"; return b
+    b = _person_box(im)
+    if b: _LAST_LOCAL = "orang"; return b
+    b = _saliency_box(im)
+    if b: _LAST_LOCAL = "saliency"; return b
+    _LAST_LOCAL = None
+    return None
+
 def local_focus_box(im):
     """Fokus LOKAL (gratis): utamakan WAJAH; kalau nggak ada, pakai area paling ramai detail."""
-    return _face_box(im) or _saliency_box(im)
+    return _local_focus(im)
 
 def smart_crop_to(im, w, h, context=""):
     """Crop ke (w,h), 3 lapis: 1) AI (konteks) kalau nyala & kuota; 2) WAJAH lokal (gratis);
@@ -693,7 +742,7 @@ def smart_crop_to(im, w, h, context=""):
                 if bx1 - bx0 >= 8 and by1 - by0 >= 8:
                     print("    [smart-crop] pakai fokus LOKAL (wajah/saliency)")
                     cropped, rect = _box_crop_wh(im, (bx0, by0, bx1, by1), w, h)
-                    return cropped, "lokal", rect
+                    return cropped, (_LAST_LOCAL or "lokal"), rect
         except Exception as e:
             print("    ! crop lokal gagal:", e)
     # crop tengah biasa
@@ -1962,13 +2011,14 @@ def process_page(page, workdir, mem=None, revision=None):
             lines += ["", "🔎 Cek mandiri (cover): aman ✅"]
         else:
             lines += ["", "🔎 Cek mandiri: dilewati — kuota AI lagi penuh, nanti dicoba lagi"]
-    # laporan auto-crop (biar keliatan jalan apa nggak)
+    # laporan auto-crop (biar keliatan jalan apa nggak + metodenya apa)
     if smart_crop_slides:
-        _ai = [str(i) for i, mth in smart_crop_slides if mth == "ai"]
-        _lk = [str(i) for i, mth in smart_crop_slides if mth != "ai"]
-        seg = []
-        if _ai: seg.append(f"AI: slide {', '.join(_ai)}")
-        if _lk: seg.append(f"lokal(wajah/saliency): slide {', '.join(_lk)}")
+        from collections import OrderedDict
+        _lbl = {"ai": "AI", "wajah": "wajah", "orang": "orang", "saliency": "saliency", "lokal": "lokal"}
+        groups = OrderedDict()
+        for i, mth in smart_crop_slides:
+            groups.setdefault(_lbl.get(mth, mth), []).append(str(i))
+        seg = [f"{k}: slide {', '.join(v)}" for k, v in groups.items()]
         lines += ["", "✂️ Auto-crop jalan — " + "; ".join(seg)]
     else:
         lines += ["", "✂️ Auto-crop: crop tengah (subjek nggak kedeteksi / foto polos)"]
