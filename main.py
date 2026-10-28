@@ -704,7 +704,7 @@ def smart_crop_to(im, w, h, context=""):
     else:
         nh = int(W / target); y = (H - nh) // 2; im2 = im.crop((0, y, W, y + nh))
         rect = (0.0, y / H, 1.0, (y + nh) / H)
-    return im2.resize((w, h), Image.LANCZOS), rect
+    return im2.resize((w, h), Image.LANCZOS), None, rect
 
 def make_bw_photo(img_bytes, out_path, clean_out=None, full_out=None, context=""):
     src = Image.open(io.BytesIO(img_bytes)).convert("RGB")
