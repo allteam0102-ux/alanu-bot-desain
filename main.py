@@ -288,6 +288,25 @@ def read_property(props, name, kind):
         return (p.get("status") or {}).get("name", "").strip()
     return ""
 
+def read_first(props, names, kind):
+    """Coba beberapa nama kolom berurutan; kembalikan (nilai, nama_yg_kepakai)."""
+    for nm in names:
+        v = read_property(props, nm, kind)
+        if v and str(v).strip():
+            return v, nm
+    return "", ""
+
+def longest_rich_text(props):
+    """Fallback terakhir: ambil kolom rich_text TERPANJANG (biasanya = kolom isi konten),
+    biar bot tetap jalan walau nama kolomnya nggak dikenali."""
+    best, best_name = "", ""
+    for nm, p in props.items():
+        if isinstance(p, dict) and p.get("type") == "rich_text":
+            v = _plain_text(p.get("rich_text", [])).strip()
+            if len(v) > len(best):
+                best, best_name = v, nm
+    return best, best_name
+
 def get_title(props):
     t = read_property(props, TITLE_PROPERTY, "title")
     if t:
@@ -1906,12 +1925,19 @@ def process_page(page, workdir, mem=None, revision=None):
     page_id = page.get("id", "")
     title = get_title(props) or "Tanpa Judul"
     fmt = read_property(props, FORMAT_PROPERTY, "select") or "Single Post"
-    content = read_property(props, CONTENT_PROPERTY, "rich_text")
+    # baca kolom isi FLEKSIBEL: coba beberapa nama, lalu fallback kolom teks terpanjang
+    _cont_names = [CONTENT_PROPERTY, "Isi Konten", "Konten", "Content", "Isi", "Caption", "Script", "Naskah"]
+    content, cname = read_first(props, _cont_names, "rich_text")
+    if not content.strip():
+        content, cname = longest_rich_text(props)   # fallback: kolom teks terpanjang
+    print(f"  [kolom isi dipakai: '{cname or '-'}']")
     img_field = read_property(props, IMGURL_PROPERTY, "url") or read_property(props, IMGURL_PROPERTY, "rich_text")
     theme = read_property(props, THEME_PROPERTY, "select") or read_property(props, THEME_PROPERTY, "status") or DEFAULT_THEME
 
     if not content.strip():
-        raise ValueError("Kolom 'Konten' kosong.")
+        raise ValueError("Kolom isi konten kosong / kolomnya nggak ketemu. Pastikan ada kolom teks "
+                         "berisi konten (mis. 'Konten' / 'Isi Konten'), atau set secret CONTENT_PROPERTY "
+                         "ke nama kolom yang bener.")
 
     slide_blocks = split_slides(content)
     if "single" in fmt.lower():
