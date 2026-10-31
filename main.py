@@ -1185,6 +1185,7 @@ def tg_download_file(file_path, out_path):
 DEFAULT_MEMORY = {
     "preferences": {"head_scale": 1.0, "body_scale": 1.0, "scrim": 1.0, "soft": 0.0, "head_bold": True},
     "photo_history": {},  # id_foto (str) -> unix_ts terakhir dipakai (anti pakai-ulang < 6 bulan)
+    "photo_style": {},    # kata_gaya -> hitungan (dari approve-foto) -> acuan cari foto berikutnya
     "pending": {},        # token -> {title, page_id, ts, revision}
     "resolved": [],       # token yang sudah dinilai (anti dobel)
     "awaiting_text": None,  # token yang menunggu alasan ketik
@@ -1525,6 +1526,30 @@ def _extract_json(resp):
             return None
     return None
 
+def photo_style_keywords(image_path):
+    """Baca 'vibe'/gaya foto yg di-approve -> kata kunci Inggris (buat nyari foto berikutnya).
+    [] kalau AI mati/kuota penuh. Ala NU: foto B&W, jadi fokus ke mood/komposisi."""
+    if not GEMINI_API_KEY:
+        return []
+    prompt = ("Lihat FOTO ini. Sebutkan 3-5 kata kunci GAYA/VIBE visualnya dalam bahasa Inggris "
+              "(contoh: moody, minimalist, natural light, silhouette, cinematic, soft, aesthetic, calm, dramatic). "
+              "Fokus ke MOOD/pencahayaan/komposisi, BUKAN objeknya. "
+              'Balas HANYA JSON: {"style": ["kata1","kata2",...]}')
+    d = _gemini_vision_json(prompt, image_path)
+    try:
+        words = [str(w).strip().lower() for w in (d or {}).get("style", []) if str(w).strip()]
+    except Exception:
+        return []
+    return [w for w in words if 2 <= len(w) <= 24][:5]
+
+def style_hint(mem, topn=3):
+    """Gabungan kata gaya yg paling sering di-approve -> ditempel ke query pencarian foto."""
+    ps = (mem or {}).get("photo_style") or {}
+    if not ps:
+        return ""
+    top = sorted(ps.items(), key=lambda kv: -int(kv[1] or 0))[:topn]
+    return " ".join(w for w, c in top if int(c or 0) >= 1)
+
 def _gemini_vision_json(prompt, image_path):
     """Kirim gambar + pertanyaan ke Gemini (mode 'mata'/vision), minta jawaban JSON.
     Gambar dikecilin dulu (max 640px, JPEG) biar payload kecil & cepat."""
@@ -1818,6 +1843,34 @@ def process_feedback(mem):
                                    "status": "rejected", "reason": REASON_LABEL.get(code, code)})
                 changed.append(desc)
                 tg_answer_callback(cb_id, f"Paham. {desc}. Gw revisi ya.")
+        elif kind == "af":                   # APPROVE FOTO aja -> kunci foto + belajar gaya (konten TETAP pending)
+            pid_norm = (rec.get("page_id") or "").replace("-", "")
+            if pend.get("photo_ok"):
+                tg_answer_callback(cb_id, "Foto udah dicatat sebelumnya 👍")
+            else:
+                if pid_norm:
+                    dc = mem.setdefault("design_cache", {}).setdefault(pid_norm, {})
+                    dc["photo_locked"] = True
+                learned = []
+                try:
+                    cover = os.path.join(_page_cache_dir(rec.get("page_id") or ""), "slide_1.png")
+                    if os.path.exists(cover):
+                        words = photo_style_keywords(cover)
+                        if words:
+                            ps = mem.setdefault("photo_style", {})
+                            for w in words:
+                                ps[w] = int(ps.get(w, 0) or 0) + 1
+                            learned = words
+                except Exception as _e:
+                    print("    ! belajar gaya foto gagal:", _e)
+                if tok in mem.get("pending", {}):
+                    mem["pending"][tok]["photo_ok"] = True
+                mem["log"].append({"ts": int(time.time()), "title": rec["title"],
+                                   "status": "photo_ok", "reason": ", ".join(learned)})
+                if learned:
+                    tg_answer_callback(cb_id, "🖼️ Foto dikunci + gaya dicatat: " + ", ".join(learned[:3]))
+                else:
+                    tg_answer_callback(cb_id, "🖼️ Foto dikunci. (gaya belum kecatat — AI lagi penuh)")
         elif kind == "r":                    # kompat tombol lama (Reject 2-langkah) -> abaikan halus
             tg_answer_callback(cb_id, "Pakai tombol alasan di desain baru ya 🙏")
 
@@ -1891,6 +1944,7 @@ def process_page(page, workdir, mem=None, revision=None):
                 "new_photo": bool(revision.get("new_photo", False)),
                 "slides": [int(x) for x in (revision.get("slides") or [])],
                 "dir": _page_cache_dir(page_id),
+                "locked": bool(cached.get("photo_locked")),   # foto dikunci -> jangan ganti
             }
             tgt = rev_reuse["slides"] or "semua"
             print(f"  [reuse] cache cocok (hash={content_hash}) foto_baru={rev_reuse['new_photo']} target={tgt}")
@@ -1912,8 +1966,8 @@ def process_page(page, workdir, mem=None, revision=None):
             cpath_clean = os.path.join(rev_reuse["dir"], f"slide_{i}_clean.png")
             if os.path.exists(cpath):
                 targeted = (not rev_reuse["slides"]) or (i in rev_reuse["slides"])
-                if not (rev_reuse["new_photo"] and targeted):
-                    shutil.copyfile(cpath, img_path)   # foto lama dipakai lagi
+                if rev_reuse.get("locked") or not (rev_reuse["new_photo"] and targeted):
+                    shutil.copyfile(cpath, img_path)   # foto lama dipakai lagi (dikunci / bukan target ganti)
                     if os.path.exists(cpath_clean):
                         shutil.copyfile(cpath_clean, clean_path)
                     reused = True
@@ -1932,6 +1986,8 @@ def process_page(page, workdir, mem=None, revision=None):
                     q = ai_kws[i - 1].strip()          # kata kunci FOTO dari AI (Inggris)
                 else:
                     q = keyword_for(i - 1, keyword_blocks, headline, body)
+                _sh = style_hint(mem)                 # bias ke selera foto yg di-approve
+                if _sh: q = (q + " " + _sh).strip()
                 _before = set(used_ids)
                 data = auto_image_bytes(q, used_ids)
                 if data and mem is not None:
@@ -1967,9 +2023,11 @@ def process_page(page, workdir, mem=None, revision=None):
 
     # catat metadata cache (buat cek kecocokan di revisi berikutnya)
     if mem is not None:
+        _prev = (mem.get("design_cache", {}) or {}).get(pid_norm, {})
         mem.setdefault("design_cache", {})[pid_norm] = {
             "hash": content_hash, "n": total, "title": title,
-            "slides": slide_cache, "ts": int(time.time())}
+            "slides": slide_cache, "ts": int(time.time()),
+            "photo_locked": bool(_prev.get("photo_locked"))}   # pertahankan status 'foto dikunci'
         mem["last_page"] = {"page_id": page_id, "title": title, "ts": int(time.time())}
 
     # --- CEK MANDIRI (AI vision) — CUKUP slide COVER biar hemat kuota gratis Gemini ---
@@ -2064,7 +2122,8 @@ def process_page(page, workdir, mem=None, revision=None):
         pid_cb = (page_id or "").replace("-", "")     # page_id ditaruh di tombol (anti-hilang)
         mem["pending"][token] = {"title": title, "page_id": page_id,
                                  "ts": int(time.time()), "revision": rev_n}
-        rows = [[("✅ Approve (oke!)", f"a:{token}:{pid_cb}")]]
+        rows = [[("✅ Approve semua (oke!)", f"a:{token}:{pid_cb}")],
+                [("🖼️ Foto aja udah pas", f"af:{token}:{pid_cb}")]]
         rr = []
         for label, code in REASON_BUTTONS:
             rr.append(("❌ " + label, f"rs:{token}:{code}:{pid_cb}"))
