@@ -1866,6 +1866,7 @@ def process_feedback(mem):
             pid_norm = (rec.get("page_id") or "").replace("-", "")
             if pend.get("photo_ok"):
                 tg_answer_callback(cb_id, "Foto udah dicatat sebelumnya 👍")
+                tg_message(f"🖼️ Foto '{rec['title']}' udah kekunci dari tadi 👍 Desain yang lain masih nunggu approve kamu ya.")
             else:
                 if pid_norm:
                     dc = mem.setdefault("design_cache", {}).setdefault(pid_norm, {})
@@ -1890,6 +1891,13 @@ def process_feedback(mem):
                     tg_answer_callback(cb_id, "🖼️ Foto dikunci + gaya dicatat: " + ", ".join(learned[:3]))
                 else:
                     tg_answer_callback(cb_id, "🖼️ Foto dikunci. (gaya belum kecatat — AI lagi penuh)")
+                _msg = f"🖼️ Foto '{rec['title']}' udah dikunci — pas revisi berikutnya fotonya nggak bakal ganti."
+                if learned:
+                    _msg += " Gaya fotonya gw catat buat konten berikutnya: " + ", ".join(learned[:3]) + "."
+                else:
+                    _msg += " (Gaya belum kecatat soalnya AI lagi penuh — tapi fotonya tetep kekunci kok.)"
+                _msg += "\nDesain yang lain masih nunggu approve kamu ya 👍"
+                tg_message(_msg)
         elif kind == "r":                    # kompat tombol lama (Reject 2-langkah) -> abaikan halus
             tg_answer_callback(cb_id, "Pakai tombol alasan di desain baru ya 🙏")
 
